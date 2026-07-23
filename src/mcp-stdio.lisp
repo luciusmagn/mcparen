@@ -954,7 +954,6 @@ follow a caller's current workspace without rebuilding the transport."
     (with-lock-held ((mcp-stdio-transport-state-lock transport))
       (let ((closure
               (or cleanup-failure
-                  (mcp-stdio-transport-reader-failure transport)
                   (make-condition
                    'mcp-transport-error
                    :message "The MCP stdio transport closed."
@@ -972,6 +971,7 @@ follow a caller's current workspace without rebuilding the transport."
               (mcp-stdio-transport-callback-queue transport) nil
               (mcp-stdio-transport-callback-stopping-p transport) t
               (mcp-stdio-transport-reader-failure transport) closure
+              (mcp-stdio-transport-stderr-text transport) ""
               (mcp-stdio-transport-open-p transport) nil
               (mcp-stdio-transport-closing-p transport) nil))
       (maphash
@@ -1024,6 +1024,7 @@ follow a caller's current workspace without rebuilding the transport."
            :message "The inherited MCP stdio transport detached."
            :transport transport
            :cause nil)
+          (mcp-stdio-transport-stderr-text transport) ""
           (mcp-stdio-transport-open-p transport) nil
           (mcp-stdio-transport-closing-p transport) nil)
     (maphash

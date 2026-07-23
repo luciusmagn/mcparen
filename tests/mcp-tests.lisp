@@ -1767,6 +1767,41 @@
           (error ()
             nil))))))
 
+(define-test stdio-close-and-detach-discard-server-diagnostics
+  (dolist (operation '(:close :detach))
+    (let* ((transport
+             (make-mcp-stdio-transport "/bin/true"))
+           (retained-failure
+             (make-condition
+              'mcp-protocol-error
+              :message "server-diagnostic-sentinel"
+              :method "fixture"
+              :payload
+              (json-object
+               "value" "server-diagnostic-sentinel"))))
+      (setf (mcp-stdio-transport-stderr-text transport)
+            "server-diagnostic-sentinel"
+            (mcp-stdio-transport-reader-failure transport)
+            retained-failure)
+      (ecase operation
+        (:close
+         (mcp-transport-close transport))
+        (:detach
+         (mcp-transport-detach transport)))
+      (test-equal
+       ""
+       (mcp-stdio-transport-stderr-text transport)
+       :test #'string=)
+      (let ((closure
+              (mcp-stdio-transport-reader-failure transport)))
+        (test-assert (typep closure 'mcp-transport-error))
+        (test-assert (not (eq retained-failure closure)))
+        (test-assert
+         (not
+          (search
+           "server-diagnostic-sentinel"
+           (mcp-error-message closure))))))))
+
 ;;;; -- Streamable HTTP Transport Tests --
 
 (-> test-json-response-body (hash-table t) string)

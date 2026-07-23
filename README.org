@@ -103,7 +103,8 @@ On SBCL/Linux, a standard I/O server must enter a process group led by its
 direct child process. Opening fails if that boundary is not established.
 Shutdown closes stdin, then uses bounded TERM and KILL phases. One ordered,
 bounded callback worker handles server requests and notifications. Reader
-threads, writes, message sizes, and stderr capture are bounded as well.
+threads, writes, message sizes, and stderr capture are bounded as well. Closing
+or detaching a transport discards retained server diagnostics.
 
 Streamable HTTP requests share one absolute deadline across their initial POST,
 server callbacks, retry delay, and resumed SSE GET requests. A local timeout is
