@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+exec sbcl --noinform --disable-debugger --script "$(dirname "$0")/check.lisp"

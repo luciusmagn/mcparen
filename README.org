@@ -1,0 +1,106 @@
+#+title: Mcparen
+
+Mcparen is a small Common Lisp client for the Model Context Protocol. It targets
+SBCL on Linux x86-64 and implements MCP 2025-11-25 over standard I/O and
+Streamable HTTP.
+
+The library handles JSON-RPC lifecycle, concurrent requests, typed errors,
+timeouts and cancellation, cursor pagination, tool calls, resources, prompts,
+HTTP sessions, and bounded process cleanup. It contains no agent, prompt,
+configuration-file, or Skill policy.
+
+* Use
+
+Load the system through ASDF or Quicklisp:
+
+#+begin_src lisp
+(ql:quickload :mcparen)
+#+end_src
+
+Create a lazy Streamable HTTP client:
+
+#+begin_src lisp
+(defparameter *client*
+  (mcparen:make-mcp-client
+   (mcparen:make-mcp-streamable-http-transport
+    "https://example.test/mcp"
+    :headers-function
+    (lambda ()
+      (let ((token (uiop:getenv "EXAMPLE_MCP_TOKEN")))
+        (and token
+             (list (cons "Authorization"
+                         (format nil "Bearer ~A" token)))))))
+   :name "example-client"
+   :version "1.0.0"))
+
+(unwind-protect
+     (progn
+       (mcparen:mcp-client-connect *client*)
+       (dolist (tool (mcparen:mcp-client-list-tools *client*))
+         (format t "~A: ~A~%"
+                 (mcparen:mcp-tool-name tool)
+                 (mcparen:mcp-tool-description tool))))
+  (mcparen:mcp-client-close *client*))
+#+end_src
+
+Create a standard I/O client:
+
+#+begin_src lisp
+(mcparen:make-mcp-client
+ (mcparen:make-mcp-stdio-transport
+  "/absolute/path/to/server"
+  :arguments '("--stdio")
+  :directory #P"/workspace/"))
+#+end_src
+
+Credential providers run at request or process-launch time. Callers can retain
+environment-variable names instead of secret values in long-lived objects.
+
+Both transport constructors accept =:maximum-message-characters=. The default
+is 16 MiB. Mcparen rejects larger standard I/O messages, HTTP JSON bodies, SSE
+lines, and aggregate SSE event data before retaining an unbounded document.
+
+* JSON values
+
+Public raw MCP values use these exact Common Lisp representations:
+
+- JSON objects are hash tables with =equal= keys.
+- JSON arrays are vectors.
+- JSON strings and numbers are Common Lisp strings and numbers.
+- JSON =true=, =false=, and =null= are returned by
+  =json-true-value=, =json-false-value=, and =json-null-value=.
+
+=json-object= constructs an object from alternating string keys and values.
+These representations are also used by tool schemas, raw tool metadata, tool
+arguments, structured results, resources, and prompts.
+
+* Lifecycle
+
+=mcp-client-connect= performs =initialize= followed by
+=notifications/initialized=. Public operations reconnect a deliberately closed
+client when it is used again. =mcp-client-close= terminates owned resources.
+=mcp-client-detach= only closes inherited descriptors and is suitable for a
+forked image that must not signal a parent-owned server.
+
+On SBCL/Linux, a standard I/O server must enter a process group led by its
+direct child process. Opening fails if that boundary is not established.
+Shutdown closes stdin, then uses bounded TERM and KILL phases. One ordered,
+bounded callback worker handles server requests and notifications. Reader
+threads, writes, message sizes, and stderr capture are bounded as well.
+
+Streamable HTTP requests share one absolute deadline across their initial POST,
+server callbacks, retry delay, and resumed SSE GET requests. A local timeout is
+reported as =mcp-timeout= so the client can send =notifications/cancelled=.
+Interrupted SSE streams resume with =Last-Event-ID= and respect the server's
+=retry= interval.
+
+* Checks
+
+Run:
+
+#+begin_src sh
+./script/check
+#+end_src
+
+The check loads =mcparen/tests= in a fresh SBCL process and runs its protocol
+and transport fixtures.
