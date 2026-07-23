@@ -338,6 +338,75 @@
     :documentation "The function writing a response body to its live stream."))
   (:documentation "A fixture response body written after headers are flushed."))
 
+(defclass test-http-exchange-scope ()
+  ((lock
+    :initform (make-lock "mcparen HTTP exchange scope fixture")
+    :reader test-http-exchange-scope-lock
+    :type t
+    :documentation "The lock protecting scope counters.")
+   (entry-count
+    :initform 0
+    :accessor test-http-exchange-scope-entry-count
+    :type (integer 0)
+    :documentation "The number of completed scope entries.")
+   (leave-count
+    :initform 0
+    :accessor test-http-exchange-scope-leave-count
+    :type (integer 0)
+    :documentation "The number of completed scope leaves.")
+   (active-count
+    :initform 0
+    :accessor test-http-exchange-scope-active-count
+    :type (integer 0)
+    :documentation "The number of scopes active in all fixture threads.")
+   (maximum-active-count
+    :initform 0
+    :accessor test-http-exchange-scope-maximum-active-count
+    :type (integer 0)
+    :documentation "The greatest number of simultaneously active scopes."))
+  (:documentation "Thread-safe counters for an HTTP exchange scope test."))
+
+(-> test-http-exchange-scope-function
+    (test-http-exchange-scope)
+    function)
+(defun test-http-exchange-scope-function (scope)
+  "Return a balanced synchronous exchange scope function for SCOPE."
+  (lambda (function)
+    (with-lock-held ((test-http-exchange-scope-lock scope))
+      (incf (test-http-exchange-scope-entry-count scope))
+      (incf (test-http-exchange-scope-active-count scope))
+      (setf (test-http-exchange-scope-maximum-active-count scope)
+            (max
+             (test-http-exchange-scope-maximum-active-count scope)
+             (test-http-exchange-scope-active-count scope))))
+    (unwind-protect
+         (funcall function)
+      (with-lock-held ((test-http-exchange-scope-lock scope))
+        (decf (test-http-exchange-scope-active-count scope))
+        (incf (test-http-exchange-scope-leave-count scope))))))
+
+(-> test-http-exchange-scope-active-p
+    (test-http-exchange-scope)
+    boolean)
+(defun test-http-exchange-scope-active-p (scope)
+  "Return true when at least one fixture exchange scope is active."
+  (with-lock-held ((test-http-exchange-scope-lock scope))
+    (if (plusp (test-http-exchange-scope-active-count scope))
+        t
+        nil)))
+
+(-> test-http-exchange-scope-counts
+    (test-http-exchange-scope)
+    (values integer integer integer integer))
+(defun test-http-exchange-scope-counts (scope)
+  "Return entry, leave, active, and maximum active counts for SCOPE."
+  (with-lock-held ((test-http-exchange-scope-lock scope))
+    (values
+     (test-http-exchange-scope-entry-count scope)
+     (test-http-exchange-scope-leave-count scope)
+     (test-http-exchange-scope-active-count scope)
+     (test-http-exchange-scope-maximum-active-count scope))))
+
 (defclass test-http-server ()
   ((socket
     :initarg :socket

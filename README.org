@@ -63,6 +63,13 @@ Create a standard I/O client:
 Credential providers run at request or process-launch time. Callers can retain
 environment-variable names instead of secret values in long-lived objects.
 
+Streamable HTTP transports also accept =:exchange-scope-function=. This function
+receives and synchronously invokes a zero-argument thunk around each complete
+HTTP exchange, from late header resolution through response parsing and
+dispatch. It can establish application-owned dynamic state for normal requests,
+SSE resumptions, idle listener cycles, and session deletion. The default simply
+invokes the thunk.
+
 Both transport constructors accept =:maximum-message-characters=. The default
 is 16 MiB. Mcparen rejects larger standard I/O messages, HTTP JSON bodies, SSE
 lines, and aggregate SSE event data before retaining an unbounded document.

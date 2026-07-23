@@ -1872,6 +1872,327 @@
        (finish-output stream)
        (sleep 0.02)))))
 
+(define-test http-exchange-scope-encloses-normal-response-processing
+  (let* ((scope (make-instance 'test-http-exchange-scope))
+         (base-scope-function
+           (test-http-exchange-scope-function scope))
+         (parsed-response-p nil))
+    (labels ((handler (server request)
+               "Return one JSON response."
+               (declare (ignore server))
+               (let ((message
+                       (json-decode
+                        (test-http-request-body request))))
+                 (values
+                  200
+                  (list (cons "Content-Type" "application/json"))
+                  (test-json-response-body
+                   message (json-object "ok" yason:true)))))
+
+             (scope-function (function)
+               "Require parsed response data before leaving the scope."
+               (funcall
+                base-scope-function
+                (lambda ()
+                  (let ((response (funcall function)))
+                    (test-assert (hash-table-p response))
+                    (setf parsed-response-p t)
+                    response)))))
+      (with-test-http-server (server #'handler)
+        (let ((transport
+                (make-mcp-streamable-http-transport
+                 (test-http-server-url server)
+                 :headers-function
+                 (lambda ()
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   nil)
+                 :exchange-scope-function #'scope-function)))
+          (unwind-protect
+               (progn
+                 (mcp-transport-open transport)
+                 (let ((response
+                         (mcp-transport-request
+                          transport (test-http-ping-request 81) 2)))
+                   (test-assert
+                    (json-true-p
+                     (json-get
+                      (json-get response "result")
+                      "ok"))))
+                 (test-assert parsed-response-p))
+            (mcp-transport-detach transport)))))
+    (multiple-value-bind (entries leaves active maximum-active)
+        (test-http-exchange-scope-counts scope)
+      (test-equal 1 entries)
+      (test-equal 1 leaves)
+      (test-equal 0 active)
+      (test-equal 1 maximum-active))))
+
+(define-test http-exchange-scope-unwinds-after-response-failure
+  (let* ((scope (make-instance 'test-http-exchange-scope))
+         (base-scope-function
+           (test-http-exchange-scope-function scope))
+         (saw-failure-inside-scope-p nil))
+    (labels ((handler (server request)
+               "Return malformed JSON."
+               (declare (ignore server request))
+               (values
+                200
+                (list (cons "Content-Type" "application/json"))
+                "{"))
+
+             (scope-function (function)
+               "Observe response failures before leaving the scope."
+               (funcall
+                base-scope-function
+                (lambda ()
+                  (handler-bind
+                      ((error
+                         (lambda (condition)
+                           (declare (ignore condition))
+                           (setf saw-failure-inside-scope-p t))))
+                    (funcall function))))))
+      (with-test-http-server (server #'handler)
+        (let ((transport
+                (make-mcp-streamable-http-transport
+                 (test-http-server-url server)
+                 :headers-function
+                 (lambda ()
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   nil)
+                 :exchange-scope-function #'scope-function)))
+          (unwind-protect
+               (progn
+                 (mcp-transport-open transport)
+                 (test-signals mcp-error
+                   (mcp-transport-request
+                    transport (test-http-ping-request 82) 2))
+                 (test-assert saw-failure-inside-scope-p))
+            (mcp-transport-detach transport)))))
+    (multiple-value-bind (entries leaves active maximum-active)
+        (test-http-exchange-scope-counts scope)
+      (test-equal 1 entries)
+      (test-equal 1 leaves)
+      (test-equal 0 active)
+      (test-equal 1 maximum-active))))
+
+(define-test http-exchange-scope-encloses-sse-resumption
+  (let* ((scope (make-instance 'test-http-exchange-scope))
+         (base-scope-function
+           (test-http-exchange-scope-function scope))
+         (request nil)
+         (header-resolution-count 0)
+         (saw-notification-p nil)
+         (parsed-response-p nil))
+    (labels ((handler (server http-request)
+               "Split one response across an initial SSE stream and a GET."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method http-request) "POST")
+                  (setf request
+                        (json-decode
+                         (test-http-request-body http-request)))
+                  (values
+                   200
+                   (list (cons "Content-Type" "text/event-stream"))
+                   (test-sse-resume-body
+                    "scope-resume-one"
+                    1
+                    (json-object
+                     "jsonrpc" "2.0"
+                     "method" "notifications/progress"
+                     "params" (json-object "progress" 1)))))
+                 ((string= (test-http-request-method http-request) "GET")
+                  (test-equal
+                   "scope-resume-one"
+                   (test-http--header http-request "last-event-id")
+                   :test #'string=)
+                  (values
+                   200
+                   (list (cons "Content-Type" "text/event-stream"))
+                   (test-sse-resume-body
+                    "scope-resume-two"
+                    1
+                    (test-rpc-result request (json-object "done" yason:true)))))
+                 (t
+                  (error "Unexpected exchange-scope request method."))))
+
+             (scope-function (function)
+               "Require the resumed response before leaving the scope."
+               (funcall
+                base-scope-function
+                (lambda ()
+                  (let ((response (funcall function)))
+                    (test-assert (hash-table-p response))
+                    (setf parsed-response-p t)
+                    response)))))
+      (with-test-http-server (server #'handler)
+        (let ((transport
+                (make-mcp-streamable-http-transport
+                 (test-http-server-url server)
+                 :headers-function
+                 (lambda ()
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   (incf header-resolution-count)
+                   nil)
+                 :notification-handler
+                 (lambda (method params)
+                   (declare (ignore params))
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   (test-equal
+                    "notifications/progress" method :test #'string=)
+                   (setf saw-notification-p t))
+                 :exchange-scope-function #'scope-function)))
+          (unwind-protect
+               (progn
+                 (mcp-transport-open transport)
+                 (let ((response
+                         (mcp-transport-request
+                          transport (test-http-ping-request 83) 2)))
+                   (test-assert
+                    (json-true-p
+                     (json-get
+                      (json-get response "result")
+                      "done"))))
+                 (test-assert parsed-response-p)
+                 (test-assert saw-notification-p)
+                 (test-equal 2 header-resolution-count))
+            (mcp-transport-detach transport)))))
+    (multiple-value-bind (entries leaves active maximum-active)
+        (test-http-exchange-scope-counts scope)
+      (test-equal 1 entries)
+      (test-equal 1 leaves)
+      (test-equal 0 active)
+      (test-equal 1 maximum-active))))
+
+(define-test http-exchange-scope-wraps-each-idle-listener-cycle
+  (let ((scope (make-instance 'test-http-exchange-scope))
+        (get-count 0)
+        (header-resolution-count 0)
+        (saw-notification-p nil))
+    (labels ((handler (server request)
+               "Send one idle event, then reject the resumed idle GET."
+               (declare (ignore server))
+               (test-equal
+                "GET"
+                (test-http-request-method request)
+                :test #'string=)
+               (incf get-count)
+               (if (= get-count 1)
+                   (values
+                    200
+                    (list (cons "Content-Type" "text/event-stream"))
+                    (test-sse-resume-body
+                     "idle-scope-one"
+                     1
+                     (json-object
+                      "jsonrpc" "2.0"
+                      "method" "notifications/progress"
+                      "params" (json-object "progress" 1))))
+                   (progn
+                     (test-equal
+                      "idle-scope-one"
+                      (test-http--header request "last-event-id")
+                      :test #'string=)
+                     (values 405 nil "")))))
+      (with-test-http-server (server #'handler)
+        (let ((transport
+                (make-mcp-streamable-http-transport
+                 (test-http-server-url server)
+                 :headers-function
+                 (lambda ()
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   (incf header-resolution-count)
+                   nil)
+                 :notification-handler
+                 (lambda (method params)
+                   (declare (ignore params))
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   (test-equal
+                    "notifications/progress" method :test #'string=)
+                   (setf saw-notification-p t))
+                 :exchange-scope-function
+                 (test-http-exchange-scope-function scope))))
+          (unwind-protect
+               (progn
+                 (mcp-transport-open transport)
+                 (setf
+                  (mcp-http-transport-session-identifier transport)
+                  "idle-scope-session"
+                  (mcp-http-transport-protocol-version transport)
+                  "2025-11-25")
+                 (mcp-http--start-idle-listener transport)
+                 (test-assert
+                  (test-wait-until
+                   (lambda ()
+                     (and
+                      (eq
+                       (mcp-http-transport-listener-support-state
+                        transport)
+                       ':unsupported)
+                      (null
+                       (mcp-http-transport-listener-thread transport))))
+                   2)
+                  "The scoped idle listener completed both cycles.")
+                 (test-assert saw-notification-p)
+                 (test-equal 2 get-count)
+                 (test-equal 2 header-resolution-count))
+            (mcp-transport-detach transport)))))
+    (multiple-value-bind (entries leaves active maximum-active)
+        (test-http-exchange-scope-counts scope)
+      (test-equal 2 entries)
+      (test-equal 2 leaves)
+      (test-equal 0 active)
+      (test-equal 1 maximum-active))))
+
+(define-test http-exchange-scope-encloses-session-delete
+  (let ((scope (make-instance 'test-http-exchange-scope))
+        (saw-delete-p nil))
+    (labels ((handler (server request)
+               "Accept one authenticated session deletion."
+               (declare (ignore server))
+               (test-equal
+                "DELETE"
+                (test-http-request-method request)
+                :test #'string=)
+               (test-equal
+                "Bearer fixture"
+                (test-http--header request "authorization")
+                :test #'string=)
+               (setf saw-delete-p t)
+               (values 202 nil "")))
+      (with-test-http-server (server #'handler)
+        (let ((transport
+                (make-mcp-streamable-http-transport
+                 (test-http-server-url server)
+                 :headers-function
+                 (lambda ()
+                   (test-assert
+                    (test-http-exchange-scope-active-p scope))
+                   (list
+                    (cons "Authorization" "Bearer fixture")))
+                 :exchange-scope-function
+                 (test-http-exchange-scope-function scope))))
+          (mcp-transport-open transport)
+          (setf
+           (mcp-http-transport-session-identifier transport)
+           "delete-scope-session"
+           (mcp-http-transport-protocol-version transport)
+           "2025-11-25")
+          (mcp-transport-close transport)
+          (test-assert saw-delete-p))))
+    (multiple-value-bind (entries leaves active maximum-active)
+        (test-http-exchange-scope-counts scope)
+      (test-equal 1 entries)
+      (test-equal 1 leaves)
+      (test-equal 0 active)
+      (test-equal 1 maximum-active))))
+
 (define-test http-supports-json-notification-session-and-close
   (let ((saw-initialized-p nil)
         (saw-ping-p nil)

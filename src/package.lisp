@@ -66,8 +66,11 @@
            #:mcp-error
            #:mcp-error-message
            #:mcp-http-transport-connect-timeout
+           #:mcp-http-transport-exchange-scope-function
            #:mcp-http-transport-headers-function
+           #:mcp-http-transport-listener-failure
            #:mcp-http-transport-maximum-message-characters
+           #:mcp-http-transport-pending-session-identifier
            #:mcp-http-transport-protocol-version
            #:mcp-http-transport-session-identifier
            #:mcp-http-transport-url
