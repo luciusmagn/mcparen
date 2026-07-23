@@ -723,7 +723,7 @@
                                    (nreverse pages))))
                               (setf (gethash next-cursor seen-cursors)
                                     t
-                                    cursor next-cursor))))
+                                    cursor next-cursor)))
                        finally
                           (error 'mcp-protocol-error
                                  :message
@@ -732,7 +732,7 @@
                                          method
                                          *mcp-pagination-maximum-pages*)
                                  :method method
-                                 :payload nil))))
+                                 :payload nil)))))
       (loop repeat *mcp-pagination-restart-limit*
             do
                (mcp-client-connect client)
