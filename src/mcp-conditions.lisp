@@ -53,7 +53,7 @@
     :reader mcp-message-too-large-limit
     :type integer
     :documentation "The maximum accepted character count."))
-  (:documentation "An inbound MCP document exceeded its configured size bound."))
+  (:documentation "An MCP document exceeded its configured size bound."))
 
 (define-condition mcp-rpc-error (mcp-protocol-error)
   ((code

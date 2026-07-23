@@ -365,6 +365,103 @@
                 (mcp-message-too-large-source condition)
                 :test #'string=)))
 
+(define-test json-preflights-adversarial-depth-and-node-count
+  (let ((deep
+          (concatenate
+           'string
+           (make-string 100000 :initial-element #\[)
+           (make-string 100000 :initial-element #\])))
+        (wide
+          (with-output-to-string (stream)
+            (write-char #\[ stream)
+            (loop repeat 200000
+                  for first-p = t then nil
+                  unless first-p
+                    do (write-char #\, stream)
+                  do (write-char #\0 stream))
+            (write-char #\] stream))))
+    (test-assert
+     (< (length deep) *mcp-maximum-message-characters*))
+    (test-assert
+     (< (length wide) *mcp-maximum-message-characters*))
+    (let ((*json-maximum-depth* 32))
+      (let ((condition
+              (test-signals mcp-protocol-error
+                (json-decode deep))))
+        (test-assert
+         (search "nesting depth" (mcp-error-message condition)))))
+    (let ((*json-maximum-nodes* 64))
+      (let ((condition
+              (test-signals mcp-protocol-error
+                (json-decode wide))))
+        (test-assert
+         (search "node count" (mcp-error-message condition)))))))
+
+(define-test json-validates-decoded-container-and-string-bounds
+  (let ((*json-maximum-array-elements* 2))
+    (let ((condition
+            (test-signals mcp-protocol-error
+              (json-decode "[0,1,2]"))))
+      (test-assert
+       (search "elements in one array"
+               (mcp-error-message condition)))))
+  (let ((*json-maximum-object-members* 2))
+    (let ((condition
+            (test-signals mcp-protocol-error
+              (json-decode "{\"a\":1,\"b\":2,\"c\":3}"))))
+      (test-assert
+       (search "members in one object"
+               (mcp-error-message condition)))))
+  (let ((*json-maximum-aggregate-string-characters* 4))
+    (let ((condition
+            (test-signals mcp-protocol-error
+              (json-decode "[\"abc\",\"de\"]"))))
+      (test-assert
+       (search "aggregate string characters"
+               (mcp-error-message condition)))))
+  (let ((*json-maximum-object-key-characters* 4))
+    (let ((condition
+            (test-signals mcp-protocol-error
+              (json-decode "{\"abcde\":0}"))))
+      (test-assert
+       (search "characters in one object key"
+               (mcp-error-message condition))))))
+
+(define-test json-validates-programmatic-values-before-encoding
+  (let ((deep 0))
+    (loop repeat 100000
+          do (setf deep (vector deep)))
+    (let ((*json-maximum-depth* 32))
+      (let ((condition
+              (test-signals mcp-protocol-error
+                (json-encode deep))))
+        (test-assert
+         (search "nesting depth" (mcp-error-message condition))))))
+  (let ((cycle (make-array 1)))
+    (setf (aref cycle 0) cycle)
+    (let ((condition
+            (test-signals mcp-protocol-error
+              (json-encode cycle))))
+      (test-assert
+       (search "cyclic JSON array"
+               (mcp-error-message condition)))))
+  (let ((condition
+          (test-signals mcp-protocol-error
+            (json-encode (ash 1 100000)))))
+    (test-assert
+     (search "characters in one number"
+             (mcp-error-message condition))))
+  (let ((condition
+          (test-signals mcp-message-too-large
+            (json-encode
+             (json-object "payload" (make-string 256))
+             :limit 64
+             :source-name "test outbound JSON"))))
+    (test-equal 64 (mcp-message-too-large-limit condition))
+    (test-equal "test outbound JSON"
+                (mcp-message-too-large-source condition)
+                :test #'string=)))
+
 (define-test json-rpc-rejects-structurally-invalid-messages
   (dolist
       (message

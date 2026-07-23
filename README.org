@@ -59,6 +59,16 @@ environment-variable names instead of secret values in long-lived objects.
 Both transport constructors accept =:maximum-message-characters=. The default
 is 16 MiB. Mcparen rejects larger standard I/O messages, HTTP JSON bodies, SSE
 lines, and aggregate SSE event data before retaining an unbounded document.
+Outbound documents are checked against the same transport-specific limit before
+encoding.
+
+JSON decoding performs a non-recursive lexical preflight before YASON and an
+iterative validation pass over the decoded tree. Encoding runs the iterative
+validation before YASON. The reloadable structural bounds allow at most 64
+nested containers, 100,000 value and key nodes, 65,536 elements per array,
+4,096 members per object, 4,096 characters per object key, 256 characters per
+number, and 12 MiB of decoded string content both per string and in aggregate.
+Programmatic cyclic objects and arrays are rejected.
 
 * JSON values
 

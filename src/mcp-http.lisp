@@ -450,7 +450,13 @@ need to retain secret header values in a long-lived client object."
              :force-string t
              :keep-alive nil
              (when message
-               (list :content (json-encode message))))
+               (list
+                :content
+                (json-encode
+                 message
+                 :limit
+                 (mcp-http-transport-maximum-message-characters
+                  transport)))))
           (let ((body-released-p nil))
             (unwind-protect
                  (progn

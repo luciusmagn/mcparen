@@ -13,7 +13,15 @@
                 #:with-lock-held)
   (:import-from #:serapeum
                 #:->)
-  (:export #:make-mcp-client
+  (:export #:*json-maximum-aggregate-string-characters*
+           #:*json-maximum-array-elements*
+           #:*json-maximum-depth*
+           #:*json-maximum-nodes*
+           #:*json-maximum-number-characters*
+           #:*json-maximum-object-key-characters*
+           #:*json-maximum-object-members*
+           #:*json-maximum-string-characters*
+           #:make-mcp-client
            #:make-mcp-stdio-transport
            #:make-mcp-streamable-http-transport
            #:json-false-value

@@ -311,7 +311,13 @@ follow a caller's current workspace without rebuilding the transport."
                        :message "The MCP stdio input stream is closed."
                        :transport transport
                        :cause nil))
-              (write-line (json-encode message) stream)
+              (write-line
+               (json-encode
+                message
+                :limit
+                (mcp-stdio-transport-maximum-message-characters
+                 transport))
+               stream)
               (finish-output stream))))
       (sb-ext:timeout ()
         (error 'mcp-timeout
