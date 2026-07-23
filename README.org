@@ -7,8 +7,8 @@ revision when selected during protocol negotiation.
 
 The library handles JSON-RPC lifecycle, concurrent requests, typed errors,
 timeouts and cancellation, cursor pagination, tool calls, resources, prompts,
-HTTP sessions, and bounded process cleanup. It contains no agent, prompt,
-configuration-file, or Skill policy.
+HTTP sessions, and bounded process cleanup. It contains no agent, prompt, or
+application configuration policy.
 
 List pagination is bounded before pages are accumulated. One list operation may
 read at most 1,000 pages and retain at most 10,000 items, 16 MiB of conservative
