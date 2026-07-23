@@ -36,6 +36,14 @@
   "Leave transports without initialization-bound session state unchanged."
   transport)
 
+(defgeneric mcp-transport-session-ready (transport)
+  (:documentation
+   "Start transport work that requires a fully initialized MCP session."))
+
+(defmethod mcp-transport-session-ready ((transport mcp-transport))
+  "Leave transports without initialized-session work unchanged."
+  transport)
+
 (defgeneric mcp-transport-close (transport)
   (:documentation "Close TRANSPORT and release all external resources."))
 

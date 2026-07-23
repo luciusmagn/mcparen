@@ -118,6 +118,7 @@
            #:mcp-transport-open
            #:mcp-transport-open-p
            #:mcp-transport-request
+           #:mcp-transport-session-ready
            #:mcp-transport-set-protocol-version
            #:with-mcp-client
            #:with-open-mcp-transport))

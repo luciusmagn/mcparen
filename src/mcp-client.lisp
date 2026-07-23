@@ -439,6 +439,8 @@
      (mcp-client-transport client)
      (mcp-client--notification "notifications/initialized")
      (mcp-client-startup-timeout client))
+    (mcp-transport-session-ready
+     (mcp-client-transport client))
     (setf (mcp-client-connected-p client) t)
     (incf (mcp-client--connection-generation client))
     client))
