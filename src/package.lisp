@@ -21,6 +21,11 @@
            #:*json-maximum-object-key-characters*
            #:*json-maximum-object-members*
            #:*json-maximum-string-characters*
+           #:*mcp-pagination-maximum-aggregate-bytes*
+           #:*mcp-pagination-maximum-aggregate-nodes*
+           #:*mcp-pagination-maximum-items*
+           #:*mcp-pagination-maximum-pages*
+           #:*mcp-pagination-restart-limit*
            #:make-mcp-client
            #:make-mcp-stdio-transport
            #:make-mcp-streamable-http-transport

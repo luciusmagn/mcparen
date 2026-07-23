@@ -264,6 +264,159 @@
                       :test #'char-equal)))
         (mcp-client-close client)))))
 
+(define-test client-bounds-aggregate-pagination-items
+  (labels ((resource (name)
+             "Return a small resource object named NAME."
+             (json-object "uri" name))
+
+           (handler (transport request)
+             "Return two two-item resource pages."
+             (declare (ignore transport))
+             (if (string= (json-get request "method") "initialize")
+                 (test-rpc-result request (test-initialize-result))
+                 (let* ((params (json-get request "params"))
+                        (cursor
+                          (and params
+                               (json-get params "cursor"))))
+                   (if cursor
+                       (test-rpc-result
+                        request
+                        (json-object
+                         "resources"
+                         (vector
+                          (resource "three")
+                          (resource "four"))))
+                       (test-rpc-result
+                        request
+                        (json-object
+                         "resources"
+                         (vector
+                          (resource "one")
+                          (resource "two"))
+                         "nextCursor" "second")))))))
+    (let* ((transport (make-test-scripted-transport #'handler))
+           (client (make-mcp-client transport))
+           (*mcp-pagination-maximum-items* 3))
+      (unwind-protect
+           (let ((condition
+                   (test-signals mcp-protocol-error
+                     (mcp-client-list-resources client))))
+             (test-assert
+              (search "aggregate item count"
+                      (mcp-error-message condition)))
+             (test-equal
+              3
+              (length
+               (test-scripted-transport-requests transport))))
+        (mcp-client-close client)))))
+
+(define-test client-bounds-aggregate-pagination-bytes
+  (labels ((handler (transport request)
+             "Return individually small pages whose aggregate exceeds the limit."
+             (declare (ignore transport))
+             (if (string= (json-get request "method") "initialize")
+                 (test-rpc-result request (test-initialize-result))
+                 (let* ((params (json-get request "params"))
+                        (cursor
+                          (and params
+                               (json-get params "cursor")))
+                       (resource
+                         (json-object
+                          "uri"
+                          (make-string 40 :initial-element #\x))))
+                   (if cursor
+                       (test-rpc-result
+                        request
+                        (json-object "resources" (vector resource)))
+                       (test-rpc-result
+                        request
+                        (json-object
+                         "resources" (vector resource)
+                         "nextCursor" "second")))))))
+    (let* ((transport (make-test-scripted-transport #'handler))
+           (client (make-mcp-client transport))
+           (*mcp-pagination-maximum-aggregate-bytes* 105))
+      (unwind-protect
+           (let ((condition
+                   (test-signals mcp-protocol-error
+                     (mcp-client-list-resources client))))
+             (test-assert
+              (search "aggregate encoded bytes"
+                      (mcp-error-message condition)))
+             (test-equal
+              3
+              (length
+               (test-scripted-transport-requests transport))))
+        (mcp-client-close client)))))
+
+(define-test client-bounds-aggregate-pagination-nodes
+  (labels ((handler (transport request)
+             "Return pages whose combined trees exceed the node limit."
+             (declare (ignore transport))
+             (if (string= (json-get request "method") "initialize")
+                 (test-rpc-result request (test-initialize-result))
+                 (let* ((params (json-get request "params"))
+                        (cursor
+                          (and params
+                               (json-get params "cursor")))
+                       (resource (json-object "uri" "fixture")))
+                   (if cursor
+                       (test-rpc-result
+                        request
+                        (json-object "resources" (vector resource)))
+                       (test-rpc-result
+                        request
+                        (json-object
+                         "resources" (vector resource)
+                         "nextCursor" "second")))))))
+    (let* ((transport (make-test-scripted-transport #'handler))
+           (client (make-mcp-client transport))
+           (*mcp-pagination-maximum-aggregate-nodes* 8))
+      (unwind-protect
+           (let ((condition
+                   (test-signals mcp-protocol-error
+                     (mcp-client-list-resources client))))
+             (test-assert
+              (search "aggregate node count"
+                      (mcp-error-message condition)))
+             (test-equal
+              3
+              (length
+               (test-scripted-transport-requests transport))))
+        (mcp-client-close client)))))
+
+(define-test client-bounds-pagination-pages
+  (labels ((handler (transport request)
+             "Return a unique cursor after every empty resource page."
+             (declare (ignore transport))
+             (if (string= (json-get request "method") "initialize")
+                 (test-rpc-result request (test-initialize-result))
+                 (test-rpc-result
+                  request
+                  (json-object
+                   "resources" #()
+                   "nextCursor"
+                   (format nil
+                           "cursor-~D"
+                           (length
+                            (test-scripted-transport-requests
+                             transport))))))))
+    (let* ((transport (make-test-scripted-transport #'handler))
+           (client (make-mcp-client transport))
+           (*mcp-pagination-maximum-pages* 2))
+      (unwind-protect
+           (let ((condition
+                   (test-signals mcp-protocol-error
+                     (mcp-client-list-resources client))))
+             (test-assert
+              (search "2-page safety limit"
+                      (mcp-error-message condition)))
+             (test-equal
+              3
+              (length
+               (test-scripted-transport-requests transport))))
+        (mcp-client-close client)))))
+
 (define-test client-preserves-rpc-errors
   (labels ((handler (transport request)
              "Return a structured error for ping."
