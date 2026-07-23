@@ -1,8 +1,9 @@
 #+title: Mcparen
 
 Mcparen is a small Common Lisp client for the Model Context Protocol. It targets
-SBCL on Linux x86-64 and implements MCP 2025-11-25 over standard I/O and
-Streamable HTTP.
+SBCL on Linux x86-64 and implements MCP 2025-11-25 and 2025-06-18 over standard
+I/O and Streamable HTTP. It requests the newer revision and accepts the older
+revision when selected during protocol negotiation.
 
 The library handles JSON-RPC lifecycle, concurrent requests, typed errors,
 timeouts and cancellation, cursor pagination, tool calls, resources, prompts,

@@ -3,7 +3,15 @@
 ;;;; -- Protocol Values --
 
 (defparameter *mcp-protocol-version* "2025-11-25"
-  "The single MCP protocol version supported by this client.")
+  "The newest MCP protocol version requested by this client.")
+
+(defparameter *mcp-supported-protocol-versions*
+  '("2025-11-25" "2025-06-18")
+  "The MCP protocol versions this client can negotiate, newest first.")
+
+(defparameter *mcp-task-protocol-versions*
+  '("2025-11-25")
+  "The supported MCP versions that define task-augmented requests.")
 
 (defparameter *mcp-default-startup-timeout* 15
   "The default initialization and discovery timeout in seconds.")
@@ -25,6 +33,26 @@
 
 (defparameter *mcp-pagination-restart-limit* 8
   "The maximum session changes tolerated while reading one paginated list.")
+
+(-> mcp-protocol-version-supported-p (t) boolean)
+(defun mcp-protocol-version-supported-p (version)
+  "Return true when VERSION names a protocol revision implemented by Mcparen."
+  (if (and (stringp version)
+           (member version
+                   *mcp-supported-protocol-versions*
+                   :test #'string=))
+      t
+      nil))
+
+(-> mcp-protocol-version-supports-tasks-p (t) boolean)
+(defun mcp-protocol-version-supports-tasks-p (version)
+  "Return true when VERSION defines MCP task-augmented requests."
+  (if (and (stringp version)
+           (member version
+                   *mcp-task-protocol-versions*
+                   :test #'string=))
+      t
+      nil))
 
 (defclass mcp-tool ()
   ((name
@@ -66,7 +94,9 @@
     :initform nil
     :reader mcp-tool-execution
     :type t
-    :documentation "Optional execution metadata supplied by the MCP server.")
+    :documentation
+    "Optional execution metadata supplied by the MCP server. Mcparen only
+interprets it for protocol revisions that define task-augmented requests.")
    (task-support
     :initarg :task-support
     :initform "forbidden"
@@ -398,8 +428,7 @@
              :method "initialize"
              :payload result))
     (let ((version (json-get result "protocolVersion")))
-      (unless (and (stringp version)
-                   (string= version *mcp-protocol-version*))
+      (unless (mcp-protocol-version-supported-p version)
         (mcp-transport-close (mcp-client-transport client))
         (error 'mcp-protocol-error
                :message
@@ -748,9 +777,10 @@
                       :method method
                       :payload nil)))))
 
-(-> mcp-client--raw->tool (t) mcp-tool)
-(defun mcp-client--raw->tool (raw)
-  "Validate RAW and return its MCP-TOOL projection."
+(-> mcp-client--raw->tool (t &optional t) mcp-tool)
+(defun mcp-client--raw->tool
+    (raw &optional (protocol-version *mcp-protocol-version*))
+  "Validate RAW and return its MCP-TOOL projection for PROTOCOL-VERSION."
   (unless (hash-table-p raw)
     (error 'mcp-protocol-error
            :message "tools/list returned a non-object tool."
@@ -809,7 +839,9 @@
                    :method "tools/list"
                    :payload raw)))))
     (let ((task-support "forbidden"))
-      (unless (eq execution :absent)
+      (when (and
+             (mcp-protocol-version-supports-tasks-p protocol-version)
+             (not (eq execution :absent)))
         (unless (hash-table-p execution)
           (error 'mcp-protocol-error
                  :message "tools/list returned malformed tool execution metadata."
@@ -894,8 +926,11 @@
 (defun mcp-client-list-tools (client)
   "Return every MCP tool, following opaque pagination cursors safely."
   (mcp-client--require-capability client "tools" "tools/list")
-  (mapcar #'mcp-client--raw->tool
-          (mcp-client--list-all client "tools/list" "tools")))
+  (mapcar
+   (lambda (raw)
+     (mcp-client--raw->tool
+      raw (mcp-client-protocol-version client)))
+   (mcp-client--list-all client "tools/list" "tools")))
 
 (-> mcp-client-call-tool
     (mcp-client mcp-tool t &key (:timeout real))

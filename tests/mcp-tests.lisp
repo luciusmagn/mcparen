@@ -77,6 +77,114 @@
             :test #'string=))
       (mcp-client-close client))))
 
+(define-test client-negotiates-supported-older-protocol
+  (labels ((handler (transport request)
+             "Select MCP 2025-06-18 and expose one tool."
+             (declare (ignore transport))
+             (let ((method (json-get request "method")))
+               (cond
+                 ((string= method "initialize")
+                  (test-rpc-result
+                   request
+                   (json-object
+                    "protocolVersion" "2025-06-18"
+                    "capabilities" (json-object "tools" (json-object))
+                    "serverInfo"
+                    (json-object
+                     "name" "older-protocol-fixture"
+                     "version" "1"))))
+                 ((string= method "tools/list")
+                  (test-rpc-result
+                   request
+                   (json-object
+                    "tools"
+                    (vector
+                     (json-object
+                      "name" "older-tool"
+                      "description" "A tool from an older session."
+                      "inputSchema" (json-object "type" "object")
+                      "execution"
+                      (json-object "taskSupport" "required"))))))
+                 ((string= method "tools/call")
+                  (test-rpc-result
+                   request
+                   (json-object
+                    "content"
+                    (vector
+                     (json-object "type" "text" "text" "called")))))
+                 (t
+                  (error "Unexpected older-protocol method ~S." method))))))
+    (let* ((transport (make-test-scripted-transport #'handler))
+           (client (make-mcp-client transport)))
+      (unwind-protect
+           (progn
+             (mcp-client-connect client)
+             (test-equal
+              "2025-06-18"
+              (mcp-client-protocol-version client)
+              :test #'string=)
+             (test-equal
+              "2025-06-18"
+              (test-scripted-transport-protocol-version transport)
+              :test #'string=)
+             (let* ((initialize-request
+                      (first
+                       (test-scripted-transport-requests transport)))
+                    (initialize-params
+                      (json-get initialize-request "params")))
+               (test-equal
+                "2025-11-25"
+                (json-get initialize-params "protocolVersion")
+                :test #'string=))
+             (let ((tool (first (mcp-client-list-tools client))))
+               (test-equal
+                "forbidden"
+                (mcp-tool-task-support tool)
+                :test #'string=)
+               (test-equal
+                "called"
+                (json-get
+                 (first
+                  (mcp-call-result-content
+                   (mcp-client-call-tool
+                    client tool (json-object))))
+                 "text")
+                :test #'string=)))
+        (mcp-client-close client)))))
+
+(define-test client-rejects-unsupported-negotiated-protocol
+  (let* ((transport
+           (make-test-scripted-transport
+            (lambda (ignored request)
+              (declare (ignore ignored))
+              (test-rpc-result
+               request
+               (json-object
+                "protocolVersion" "2025-03-26"
+                "capabilities" (json-object)
+                "serverInfo"
+                (json-object
+                 "name" "unsupported-protocol-fixture"
+                 "version" "1"))))))
+         (client (make-mcp-client transport)))
+    (let ((condition
+            (test-signals mcp-protocol-error
+              (mcp-client-connect client))))
+      (test-equal
+       "initialize"
+       (mcp-protocol-error-method condition)
+       :test #'string=)
+      (test-assert
+       (search "unsupported protocol"
+               (mcp-error-message condition)
+               :test #'char-equal))
+      (test-assert (not (mcp-client-connected-p client)))
+      (test-assert (not (test-scripted-transport-open-p transport)))
+      (test-assert (null (mcp-client-protocol-version client)))
+      (test-assert
+       (null
+        (test-scripted-transport-protocol-version transport))))))
+
 (define-test client-connection-generation-tracks-lifecycle
   (let* ((transport
            (make-test-scripted-transport #'test-default-handler))
@@ -1813,6 +1921,93 @@
           (test-equal
            5
            (length (test-http-server-requests server))))))))
+
+(define-test http-uses-negotiated-protocol-in-subsequent-headers
+  (let ((saw-initialized-p nil)
+        (saw-ping-p nil))
+    (labels ((handler (server request)
+               "Select MCP 2025-06-18 and inspect later request headers."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((test-http-idle-get-p request)
+                  (test-equal
+                   "2025-06-18"
+                   (test-http--header
+                    request "mcp-protocol-version")
+                   :test #'string=)
+                  (values 405 nil ""))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (test-assert
+                        (null
+                         (test-http--header
+                          request "mcp-protocol-version")))
+                       (test-equal
+                        "2025-11-25"
+                        (json-get
+                         (json-get message "params")
+                         "protocolVersion")
+                        :test #'string=)
+                       (let ((result (test-initialize-result)))
+                         (setf (gethash "protocolVersion" result)
+                               "2025-06-18")
+                         (values
+                          200
+                          (list
+                           (cons "Content-Type" "application/json")
+                           (cons "Mcp-Session-Id"
+                                 "session-older-protocol"))
+                          (test-json-response-body message result))))
+                      ((string= method "notifications/initialized")
+                       (test-equal
+                        "2025-06-18"
+                        (test-http--header
+                         request "mcp-protocol-version")
+                        :test #'string=)
+                       (setf saw-initialized-p t)
+                       (values 202 nil ""))
+                      ((string= method "ping")
+                       (test-equal
+                        "2025-06-18"
+                        (test-http--header
+                         request "mcp-protocol-version")
+                        :test #'string=)
+                       (setf saw-ping-p t)
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json"))
+                        (test-json-response-body
+                         message (json-object))))
+                      (t
+                       (error "Unexpected fallback HTTP method ~S."
+                              method))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client
+                 (make-mcp-client
+                  transport
+                  :startup-timeout 3)))
+          (unwind-protect
+               (progn
+                 (mcp-client-connect client)
+                 (test-equal
+                  "2025-06-18"
+                  (mcp-http-transport-protocol-version transport)
+                  :test #'string=)
+                 (test-assert (mcp-client-ping client))
+                 (test-assert saw-initialized-p)
+                 (test-assert saw-ping-p))
+            (mcp-client-close client)))))))
 
 (define-test http-stages-session-until-initialize-result-is-committed
   (let ((delete-count 0))
