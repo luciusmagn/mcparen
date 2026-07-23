@@ -28,6 +28,14 @@
   (declare (ignore version))
   transport)
 
+(defgeneric mcp-transport-commit-initialize-session (transport)
+  (:documentation
+   "Commit session state staged by a validated initialization exchange."))
+
+(defmethod mcp-transport-commit-initialize-session ((transport mcp-transport))
+  "Leave transports without initialization-bound session state unchanged."
+  transport)
+
 (defgeneric mcp-transport-close (transport)
   (:documentation "Close TRANSPORT and release all external resources."))
 

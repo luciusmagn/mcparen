@@ -66,6 +66,12 @@
     :accessor mcp-http-transport-session-identifier
     :type t
     :documentation "The server-issued opaque MCP session identifier.")
+   (pending-session-identifier
+    :initform nil
+    :accessor mcp-http-transport-pending-session-identifier
+    :type t
+    :documentation
+    "A valid initialize response session awaiting client validation.")
    (protocol-version
     :initform nil
     :accessor mcp-http-transport-protocol-version
@@ -136,6 +142,23 @@ need to retain secret header values in a long-lived client object."
   "Add VERSION to subsequent Streamable HTTP requests."
   (with-lock-held ((mcp-http-transport-state-lock transport))
     (setf (mcp-http-transport-protocol-version transport) version))
+  transport)
+
+(defmethod mcp-transport-commit-initialize-session
+    ((transport mcp-streamable-http-transport))
+  "Promote the session staged by a validated InitializeResult."
+  (with-lock-held ((mcp-http-transport-state-lock transport))
+    (when (mcp-http-transport-pending-session-identifier transport)
+      (when (mcp-http-transport-session-identifier transport)
+        (error 'mcp-protocol-error
+               :message
+               "The MCP HTTP transport already has an active session."
+               :method "initialize"
+               :payload nil))
+      (setf (mcp-http-transport-session-identifier transport)
+            (mcp-http-transport-pending-session-identifier transport)
+            (mcp-http-transport-pending-session-identifier transport)
+            nil)))
   transport)
 
 (-> mcp-http--header-name= (t string) boolean)
@@ -367,6 +390,7 @@ need to retain secret header values in a long-lived client object."
              request-session
              (mcp-http-transport-session-identifier transport))
         (setf (mcp-http-transport-session-identifier transport) nil
+              (mcp-http-transport-pending-session-identifier transport) nil
               (mcp-http-transport-protocol-version transport) nil)))
     (error 'mcp-session-expired
            :message "The MCP HTTP session expired."
@@ -374,33 +398,38 @@ need to retain secret header values in a long-lived client object."
            :cause cause))
   nil)
 
-(-> mcp-http--accept-session-header
+(-> mcp-http--stage-initialize-session-header
     (mcp-streamable-http-transport t
-     &key (:request-session t) (:session-establishing-p boolean))
+     &key (:request-session t) (:initialize-request-p boolean))
     null)
-(defun mcp-http--accept-session-header
+(defun mcp-http--stage-initialize-session-header
     (transport response-session
-     &key request-session session-establishing-p)
-  "Validate RESPONSE-SESSION and establish it only for an eligible response."
+     &key request-session initialize-request-p)
+  "Validate and stage RESPONSE-SESSION only for an initialize response."
+  (when initialize-request-p
+    (with-lock-held ((mcp-http-transport-state-lock transport))
+      (setf (mcp-http-transport-pending-session-identifier transport) nil)))
+  (when (and initialize-request-p request-session)
+    (error 'mcp-protocol-error
+           :message
+           "An MCP initialize request carried an existing session identifier."
+           :method "initialize"
+           :payload nil))
   (when response-session
     (unless (mcp-http--valid-session-identifier-p response-session)
       (error 'mcp-protocol-error
              :message "The MCP server returned an invalid session identifier."
              :method nil
              :payload nil))
-    (cond
-      ((and session-establishing-p (null request-session))
-       (with-lock-held ((mcp-http-transport-state-lock transport))
-         (setf (mcp-http-transport-session-identifier transport)
-               response-session)))
-      ((and request-session (equal response-session request-session))
-       nil)
-      (t
-       (error 'mcp-protocol-error
-              :message
-              "The MCP server changed its session identifier unexpectedly."
-              :method nil
-              :payload nil))))
+    (unless initialize-request-p
+      (error 'mcp-protocol-error
+             :message
+             "The MCP server returned a session identifier outside initialization."
+             :method nil
+             :payload nil))
+    (with-lock-held ((mcp-http-transport-state-lock transport))
+      (setf (mcp-http-transport-pending-session-identifier transport)
+            response-session)))
   nil)
 
 (-> mcp-http--exchange
@@ -432,8 +461,11 @@ need to retain secret header values in a long-lived client object."
             :last-event-identifier last-event-identifier))
          (request-session
            (mcp-http--header-value request-headers "Mcp-Session-Id"))
-         (session-establishing-p
-           (eq method ':post)))
+         (initialize-request-p
+           (and (eq method ':post)
+                (hash-table-p message)
+                (string= (json-get message "method" "")
+                         "initialize"))))
     (handler-case
         (multiple-value-bind (body status headers)
             (apply
@@ -471,11 +503,11 @@ need to retain secret header values in a long-lived client object."
                                     status)
                             :transport transport
                             :cause nil))
-                   (mcp-http--accept-session-header
+                   (mcp-http--stage-initialize-session-header
                     transport
                     (mcp-http--header-value headers "Mcp-Session-Id")
                     :request-session request-session
-                    :session-establishing-p session-establishing-p)
+                    :initialize-request-p initialize-request-p)
                    (setf body-released-p t)
                    (values body status headers))
               (unless body-released-p
@@ -1007,6 +1039,7 @@ need to retain secret header values in a long-lived client object."
       (with-lock-held ((mcp-http-transport-state-lock transport))
         (setf (mcp-http-transport-open-p transport) nil
               (mcp-http-transport-session-identifier transport) nil
+              (mcp-http-transport-pending-session-identifier transport) nil
               (mcp-http-transport-protocol-version transport) nil))))
   nil)
 
@@ -1016,5 +1049,6 @@ need to retain secret header values in a long-lived client object."
   (with-lock-held ((mcp-http-transport-state-lock transport))
     (setf (mcp-http-transport-open-p transport) nil
           (mcp-http-transport-session-identifier transport) nil
+          (mcp-http-transport-pending-session-identifier transport) nil
           (mcp-http-transport-protocol-version transport) nil))
   nil)

@@ -407,6 +407,8 @@
             server-info
             (mcp-client-instructions client)
             (json-get result "instructions"))))
+    (mcp-transport-commit-initialize-session
+     (mcp-client-transport client))
     (mcp-transport-notify
      (mcp-client-transport client)
      (mcp-client--notification "notifications/initialized")

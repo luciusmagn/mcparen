@@ -1461,6 +1461,20 @@
    "id" identifier
    "method" "ping"))
 
+(-> test-http-initialize-request (integer) hash-table)
+(defun test-http-initialize-request (identifier)
+  "Return one raw JSON-RPC initialize request with IDENTIFIER."
+  (json-object
+   "jsonrpc" "2.0"
+   "id" identifier
+   "method" "initialize"
+   "params"
+   (json-object
+    "protocolVersion" "2025-11-25"
+    "capabilities" (json-object)
+    "clientInfo"
+    (json-object "name" "mcparen-test" "version" "1"))))
+
 (define-test http-supports-json-notification-session-and-close
   (let ((saw-initialized-p nil)
         (saw-ping-p nil)
@@ -1475,7 +1489,11 @@
                    (test-http--header request "mcp-session-id")
                    :test #'string=)
                   (setf saw-delete-p t)
-                  (values 202 nil ""))
+                  (values
+                   202
+                   (list
+                    (cons "Mcp-Session-Id" "session-json"))
+                   ""))
                  (t
                   (let* ((message
                            (json-decode
@@ -1539,6 +1557,160 @@
           (test-equal
            4
            (length (test-http-server-requests server))))))))
+
+(define-test http-stages-session-until-initialize-result-is-committed
+  (let ((delete-count 0))
+    (labels ((handler (server request)
+               "Return a session-bearing raw initialize response."
+               (declare (ignore server))
+               (if (string= (test-http-request-method request) "DELETE")
+                   (progn
+                     (incf delete-count)
+                     (values 202 nil ""))
+                   (let ((message
+                           (json-decode
+                            (test-http-request-body request))))
+                     (values
+                      200
+                      (list
+                       (cons "Content-Type" "application/json")
+                       (cons "Mcp-Session-Id" "session-pending"))
+                      (test-json-response-body
+                       message (test-initialize-result)))))))
+      (dolist (cleanup '(:close :detach))
+        (with-test-http-server (server #'handler)
+          (let ((transport
+                  (make-mcp-streamable-http-transport
+                   (test-http-server-url server))))
+            (mcp-transport-open transport)
+            (mcp-transport-request
+             transport (test-http-initialize-request 41) 2)
+            (test-assert
+             (null
+              (mcp-http-transport-session-identifier transport)))
+            (test-equal
+             "session-pending"
+             (mcp-http-transport-pending-session-identifier
+              transport)
+             :test #'string=)
+            (ecase cleanup
+              (:close
+               (mcp-transport-close transport))
+              (:detach
+               (mcp-transport-detach transport)))
+            (test-assert
+             (null
+              (mcp-http-transport-session-identifier transport)))
+            (test-assert
+             (null
+              (mcp-http-transport-pending-session-identifier
+               transport)))))))
+    (test-equal 0 delete-count)))
+
+(define-test http-discards-unvalidated-initialize-sessions
+  (dolist (response-kind '(:rpc-error :invalid-result))
+    (let ((delete-count 0))
+      (labels ((handler (server request)
+                 "Return an unusable initialize response carrying a session."
+                 (declare (ignore server))
+                 (if
+                     (string=
+                      (test-http-request-method request)
+                      "DELETE")
+                     (progn
+                       (incf delete-count)
+                       (values 202 nil ""))
+                     (let ((message
+                             (json-decode
+                              (test-http-request-body request))))
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons
+                          "Mcp-Session-Id"
+                          "session-unvalidated"))
+                        (json-encode
+                         (ecase response-kind
+                           (:rpc-error
+                            (test-rpc-error
+                             message -32603 "Initialization failed."))
+                           (:invalid-result
+                            (test-rpc-result
+                             message
+                             (json-object
+                              "protocolVersion" "2025-11-25"
+                              "capabilities" (json-object)))))))))))
+        (with-test-http-server (server #'handler)
+          (let* ((transport
+                   (make-mcp-streamable-http-transport
+                    (test-http-server-url server)))
+                 (client (make-mcp-client transport)))
+            (test-signals mcp-error
+              (mcp-client-connect client))
+            (test-assert
+             (null
+              (mcp-http-transport-session-identifier transport)))
+            (test-assert
+             (null
+              (mcp-http-transport-pending-session-identifier
+               transport)))
+            (test-equal 0 delete-count)
+            (mcp-client-close client)
+            (test-equal 0 delete-count)))))))
+
+(define-test http-rejects-session-headers-outside-initialization
+  (let ((delete-count 0))
+    (labels ((handler (server request)
+               "Return the active session header again on ping."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (incf delete-count)
+                  (values 202 nil ""))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-stable"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      ((string= method "ping")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-stable"))
+                        (test-json-response-body
+                         message (json-object))))
+                      (t
+                       (error "Unexpected session test method ~S."
+                              method))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client (make-mcp-client transport)))
+          (unwind-protect
+               (progn
+                 (mcp-client-connect client)
+                 (let ((condition
+                         (test-signals mcp-protocol-error
+                           (mcp-client-ping client))))
+                   (test-assert
+                    (search "outside initialization"
+                            (mcp-error-message condition)))))
+            (mcp-client-close client))
+          (test-equal 1 delete-count))))))
 
 (define-test http-rejects-managed-header-overrides
   (dolist (name
@@ -1755,7 +1927,8 @@
 
 (define-test http-resumes-sse-with-event-identifier-and-retry
   (let ((saw-resume-p nil)
-        (saw-delete-p nil))
+        (saw-delete-p nil)
+        (ping-request nil))
     (labels ((handler (server request)
                "Close one SSE response and resume it through GET."
                (declare (ignore server))
@@ -1791,45 +1964,117 @@
                    200
                    (list
                     (cons "Content-Type" "text/event-stream"))
-                   (test-sse-resume-body
+                    (test-sse-resume-body
                     "resume-two"
                     20
                     (test-rpc-result
-                     (test-http-ping-request 73)
+                     ping-request
                      (json-object)))))
                  (t
-                  (values
-                   200
-                   (list
-                    (cons "Content-Type" "text/event-stream")
-                    (cons "Mcp-Session-Id" "session-resume"))
-                   (test-sse-resume-body
-                    "resume-one" 20))))))
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-resume"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      ((string= method "ping")
+                       (setf ping-request message)
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "text/event-stream"))
+                        (test-sse-resume-body
+                         "resume-one" 20)))
+                      (t
+                       (error "Unexpected resume method ~S."
+                              method))))))))
       (with-test-http-server (server #'handler)
-        (let ((transport
-                (make-mcp-streamable-http-transport
-                 (test-http-server-url server))))
-          (mcp-transport-open transport)
-          (mcp-transport-set-protocol-version
-           transport "2025-11-25")
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client (make-mcp-client transport)))
           (unwind-protect
                (let* ((started (get-internal-real-time))
-                      (response
-                        (mcp-transport-request
-                         transport
-                         (test-http-ping-request 73)
-                         1))
+                      (response (mcp-client-ping client))
                       (elapsed
                         (/
                          (- (get-internal-real-time) started)
                          internal-time-units-per-second)))
-                 (test-equal 73 (json-get response "id"))
+                 (test-assert response)
                  (test-assert saw-resume-p)
                  (test-assert
                   (>= elapsed 0.015)
                   "The server-provided retry interval was respected."))
-            (mcp-transport-close transport))
+            (mcp-client-close client))
           (test-assert saw-delete-p))))))
+
+(define-test http-rejects-session-header-on-sse-get
+  (let ((ping-request nil))
+    (labels ((handler (server request)
+               "Return the active session header on an SSE resumption GET."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (values
+                   200
+                   (list
+                    (cons "Content-Type" "text/event-stream")
+                    (cons "Mcp-Session-Id" "session-get"))
+                   (test-sse-resume-body
+                    "get-two"
+                    20
+                    (test-rpc-result
+                     ping-request (json-object)))))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-get"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      ((string= method "ping")
+                       (setf ping-request message)
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "text/event-stream"))
+                        (test-sse-resume-body "get-one" 20)))
+                      (t
+                       (error "Unexpected GET session test method ~S."
+                              method))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client (make-mcp-client transport)))
+          (unwind-protect
+               (let ((condition
+                       (test-signals mcp-protocol-error
+                         (mcp-client-ping client))))
+                 (test-assert
+                  (search "outside initialization"
+                          (mcp-error-message condition))))
+            (mcp-client-close client)))))))
 
 (define-test http-sse-resumption-shares-one-request-deadline
   (let ((saw-resume-p nil))

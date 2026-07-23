@@ -103,6 +103,7 @@
            #:mcp-tool-title
            #:mcp-transport
            #:mcp-transport-close
+           #:mcp-transport-commit-initialize-session
            #:mcp-transport-detach
            #:mcp-transport-error
            #:mcp-transport-error-cause
