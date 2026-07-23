@@ -1711,6 +1711,24 @@
     "clientInfo"
     (json-object "name" "mcparen-test" "version" "1"))))
 
+(-> test-http-idle-get-p (test-http-request) boolean)
+(defun test-http-idle-get-p (request)
+  "Return true when REQUEST is the initial owned idle GET."
+  (and (string= (test-http-request-method request) "GET")
+       (null (test-http--header request "last-event-id"))))
+
+(-> test-http-keepalive-streaming-body () test-http-streaming-body)
+(defun test-http-keepalive-streaming-body ()
+  "Return a streaming body that remains open until its client closes."
+  (make-test-http-streaming-body
+   (lambda (stream)
+     (loop
+       (format stream ": keepalive~C~C~C~C"
+               #\Return #\Newline
+               #\Return #\Newline)
+       (finish-output stream)
+       (sleep 0.02)))))
+
 (define-test http-supports-json-notification-session-and-close
   (let ((saw-initialized-p nil)
         (saw-ping-p nil)
@@ -1724,12 +1742,14 @@
                    "session-json"
                    (test-http--header request "mcp-session-id")
                    :test #'string=)
-                  (setf saw-delete-p t)
+                 (setf saw-delete-p t)
                   (values
                    202
                    (list
                     (cons "Mcp-Session-Id" "session-json"))
                    ""))
+                 ((test-http-idle-get-p request)
+                  (values 405 nil ""))
                  (t
                   (let* ((message
                            (json-decode
@@ -1791,7 +1811,7 @@
           (test-assert saw-ping-p)
           (test-assert saw-delete-p)
           (test-equal
-           4
+           5
            (length (test-http-server-requests server))))))))
 
 (define-test http-stages-session-until-initialize-result-is-committed
@@ -1904,6 +1924,8 @@
                  ((string= (test-http-request-method request) "DELETE")
                   (incf delete-count)
                   (values 202 nil ""))
+                 ((test-http-idle-get-p request)
+                  (values 405 nil ""))
                  (t
                   (let* ((message
                            (json-decode
@@ -2099,43 +2121,45 @@
     (labels ((handler (server request)
                "Delay a tool response while accepting its cancellation."
                (declare (ignore server))
-               (let* ((message
-                        (json-decode
-                         (test-http-request-body request)))
-                      (method (json-get message "method")))
-                 (cond
-                   ((string= method "initialize")
-                    (values
-                     200
-                     (list
-                      (cons "Content-Type" "application/json"))
-                     (test-json-response-body
-                      message (test-initialize-result))))
-                   ((string= method "notifications/initialized")
-                    (values 202 nil ""))
-                   ((string= method "tools/call")
-                    (sleep 0.3)
-                    (values
-                     200
-                     (list
-                      (cons "Content-Type" "application/json"))
-                     (test-json-response-body
-                      message
-                      (json-object
-                       "content"
-                       (vector
-                        (json-object
-                         "type" "text"
-                         "text" "too late"))))))
-                   ((string= method "notifications/cancelled")
-                    (setf cancelled-identifier
-                          (json-get
-                           (json-get message "params")
-                           "requestId"))
-                    (values 202 nil ""))
-                   (t
-                    (error "Unexpected timeout fixture method ~S."
-                           method))))))
+               (if (test-http-idle-get-p request)
+                   (values 405 nil "")
+                   (let* ((message
+                            (json-decode
+                             (test-http-request-body request)))
+                          (method (json-get message "method")))
+                     (cond
+                       ((string= method "initialize")
+                        (values
+                         200
+                         (list
+                          (cons "Content-Type" "application/json"))
+                         (test-json-response-body
+                          message (test-initialize-result))))
+                       ((string= method "notifications/initialized")
+                        (values 202 nil ""))
+                       ((string= method "tools/call")
+                        (sleep 0.3)
+                        (values
+                         200
+                         (list
+                          (cons "Content-Type" "application/json"))
+                         (test-json-response-body
+                          message
+                          (json-object
+                           "content"
+                           (vector
+                            (json-object
+                             "type" "text"
+                             "text" "too late"))))))
+                       ((string= method "notifications/cancelled")
+                        (setf cancelled-identifier
+                              (json-get
+                               (json-get message "params")
+                               "requestId"))
+                        (values 202 nil ""))
+                       (t
+                        (error "Unexpected timeout fixture method ~S."
+                               method)))))))
       (with-test-http-server (server #'handler)
         (let* ((transport
                  (make-mcp-streamable-http-transport
@@ -2174,6 +2198,8 @@
                  ((string= (test-http-request-method request) "DELETE")
                   (setf saw-delete-p t)
                   (values 202 nil ""))
+                 ((test-http-idle-get-p request)
+                  (values 405 nil ""))
                  ((string= (test-http-request-method request) "GET")
                   (test-equal
                    ""
@@ -2263,6 +2289,8 @@
                (cond
                  ((string= (test-http-request-method request) "DELETE")
                   (values 202 nil ""))
+                 ((test-http-idle-get-p request)
+                  (values 405 nil ""))
                  ((string= (test-http-request-method request) "GET")
                   (values
                    200
@@ -2418,6 +2446,8 @@
                (cond
                  ((string= (test-http-request-method request) "DELETE")
                   (values 202 nil ""))
+                 ((test-http-idle-get-p request)
+                  (values 405 nil ""))
                  (t
                   (let* ((message
                            (json-decode
@@ -2515,6 +2545,8 @@
                (cond
                  ((string= (test-http-request-method request) "DELETE")
                   (values 202 nil ""))
+                 ((test-http-idle-get-p request)
+                  (values 405 nil ""))
                  (t
                   (let* ((message
                            (json-decode
@@ -2607,3 +2639,660 @@
                      transport)
                     :test #'string=)))
             (mcp-client-close client)))))))
+
+(define-test http-idle-get-delivers-notifications-and-server-requests
+  (let ((idle-get-count 0)
+        (notifications nil)
+        (client-response nil))
+    (labels ((handler (server request)
+               "Serve unsolicited messages through one owned idle GET."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (incf idle-get-count)
+                  (test-equal
+                   "session-idle"
+                   (test-http--header request "mcp-session-id")
+                   :test #'string=)
+                  (test-equal
+                   "2025-11-25"
+                   (test-http--header
+                    request "mcp-protocol-version")
+                   :test #'string=)
+                  (test-assert
+                   (search
+                    "text/event-stream"
+                    (test-http--header request "accept")
+                    :test #'char-equal))
+                  (values
+                   200
+                   (list
+                    (cons "Content-Type" "text/event-stream"))
+                   (make-test-http-streaming-body
+                    (lambda (stream)
+                      (write-string
+                       (test-sse-body
+                        (json-object
+                         "jsonrpc" "2.0"
+                         "method" "notifications/progress"
+                         "params" (json-object "progress" 7))
+                        (json-object
+                         "jsonrpc" "2.0"
+                         "id" 701
+                         "method" "sampling/createMessage"
+                         "params" (json-object "prompt" "idle")))
+                       stream)
+                      (finish-output stream)
+                      (loop
+                        (sleep 0.02)
+                        (format stream ": keepalive~C~C~C~C"
+                                #\Return #\Newline
+                                #\Return #\Newline)
+                        (finish-output stream))))))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method"))
+                         (identifier
+                           (json-get message "id" :absent)))
+                    (cond
+                      ((and (eql identifier 701)
+                            (null method))
+                       (setf client-response message)
+                       (values 202 nil ""))
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-idle"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      (t
+                       (error
+                        "Unexpected idle delivery message ~S."
+                        message))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)
+                  :request-handler
+                  (lambda (method params)
+                    (test-equal
+                     "sampling/createMessage"
+                     method :test #'string=)
+                    (test-equal
+                     "idle"
+                     (json-get params "prompt")
+                     :test #'string=)
+                    (json-object "role" "assistant"))
+                  :notification-handler
+                  (lambda (method params)
+                    (push
+                     (list method (json-get params "progress"))
+                     notifications))))
+               (client
+                 (make-mcp-client
+                  transport
+                  :capabilities
+                  (json-object "sampling" (json-object)))))
+          (unwind-protect
+               (progn
+                 (mcp-client-connect client)
+                 (test-assert
+                  (test-wait-until
+                   (lambda ()
+                     (and notifications client-response))
+                   2.0)
+                  "The idle listener delivered both server messages.")
+                 (test-equal
+                  '(("notifications/progress" 7))
+                  (nreverse notifications))
+                 (test-equal
+                  "assistant"
+                  (json-get
+                   (json-get client-response "result")
+                   "role")
+                  :test #'string=)
+                 (test-equal 1 idle-get-count))
+            (mcp-client-close client)))))))
+
+(define-test http-idle-get-resumes-with-event-identifier-and-retry
+  (let ((get-times nil)
+        (last-event-identifiers nil)
+        (notifications nil))
+    (labels ((handler (server request)
+               "Close idle streams and observe their resumptions."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (push (get-internal-real-time) get-times)
+                  (push
+                   (test-http--header request "last-event-id")
+                   last-event-identifiers)
+                  (case (length get-times)
+                    (1
+                     (values
+                      200
+                      (list
+                       (cons "Content-Type" "text/event-stream"))
+                      (test-sse-resume-body
+                       "idle-one"
+                       20
+                       (json-object
+                        "jsonrpc" "2.0"
+                        "method" "notifications/progress"
+                        "params" (json-object "progress" 1)))))
+                    (2
+                     (values
+                      200
+                      (list
+                       (cons "Content-Type" "text/event-stream"))
+                      (test-sse-resume-body
+                       "idle-two"
+                       20
+                       (json-object
+                        "jsonrpc" "2.0"
+                        "method" "notifications/progress"
+                        "params" (json-object "progress" 2)))))
+                    (t
+                     (values 405 nil ""))))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-resume-idle"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      (t
+                       (error
+                        "Unexpected idle resumption message ~S."
+                        message))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)
+                  :notification-handler
+                  (lambda (method params)
+                    (push
+                     (list method (json-get params "progress"))
+                     notifications))))
+               (client (make-mcp-client transport)))
+          (unwind-protect
+               (progn
+                 (mcp-client-connect client)
+                 (test-assert
+                  (test-wait-until
+                   (lambda ()
+                     (eq
+                      (mcp-http-transport-listener-support-state
+                       transport)
+                      ':unsupported))
+                   2.0)
+                  "The idle listener completed both resumptions.")
+                 (test-equal
+                  '(nil "idle-one" "idle-two")
+                  (nreverse last-event-identifiers))
+                 (test-equal
+                  '(("notifications/progress" 1)
+                    ("notifications/progress" 2))
+                  (nreverse notifications))
+                 (let ((times (nreverse get-times)))
+                   (test-assert
+                    (>=
+                     (/
+                      (- (second times) (first times))
+                      internal-time-units-per-second)
+                     0.015)
+                    "The idle listener honored the server retry delay.")))
+            (mcp-client-close client)))))))
+
+(define-test http-idle-get-405-disables-listener-without-spinning
+  (let ((idle-get-count 0))
+    (labels ((handler (server request)
+               "Reject the optional idle GET endpoint."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (incf idle-get-count)
+                  (values 405 nil ""))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-no-get"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      (t
+                       (error
+                        "Unexpected unsupported GET message ~S."
+                        message))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client (make-mcp-client transport)))
+          (unwind-protect
+               (progn
+                 (mcp-client-connect client)
+                 (test-assert
+                  (test-wait-until
+                   (lambda ()
+                     (eq
+                      (mcp-http-transport-listener-support-state
+                       transport)
+                      ':unsupported))
+                   1.0)
+                  "The listener remembered HTTP 405.")
+                 (sleep 0.1)
+                 (test-equal 1 idle-get-count))
+            (mcp-client-close client)))))))
+
+(define-test http-idle-get-404-reinitializes-at-next-client-boundary
+  (let ((initialize-count 0)
+        (idle-get-count 0))
+    (labels ((handler (server request)
+               "Expire the first session from its owned idle GET."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (incf idle-get-count)
+                  (if (= idle-get-count 1)
+                      (values 404 nil "expired")
+                      (values 405 nil "")))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (incf initialize-count)
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons
+                          "Mcp-Session-Id"
+                          (if (= initialize-count 1)
+                              "session-expiring"
+                              "session-restored")))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      ((string= method "ping")
+                       (test-equal
+                        "session-restored"
+                        (test-http--header request "mcp-session-id")
+                        :test #'string=)
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json"))
+                        (test-json-response-body
+                         message (json-object))))
+                      (t
+                       (error
+                        "Unexpected idle expiry message ~S."
+                        message))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client (make-mcp-client transport)))
+          (unwind-protect
+               (progn
+                 (mcp-client-connect client)
+                 (test-assert
+                  (test-wait-until
+                   (lambda ()
+                     (not (mcp-transport-open-p transport)))
+                   1.0)
+                  "The idle GET expired the first session.")
+                 (test-equal
+                  1
+                  (mcp-client-connection-generation client))
+                 (test-assert (mcp-client-ping client))
+                 (test-equal 2 initialize-count)
+                 (test-assert
+                  (test-wait-until
+                   (lambda () (= idle-get-count 2))
+                   1.0)
+                  "The restored session started its idle listener.")
+                 (test-equal 2 idle-get-count)
+                 (test-equal
+                  2
+                  (mcp-client-connection-generation client)))
+            (mcp-client-close client)))))))
+
+(define-test http-close-stops-idle-listener-before-delete
+  (let ((delete-count 0)
+        (listener-stopped-before-delete-p nil)
+        (transport nil))
+    (labels ((handler (server request)
+               "Hold an idle GET open and observe close ordering."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (incf delete-count)
+                  (let ((thread
+                          (mcp-http-transport-listener-thread
+                           transport)))
+                    (setf listener-stopped-before-delete-p
+                          (or (null thread)
+                              (not (thread-alive-p thread)))))
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (values
+                   200
+                   (list
+                    (cons "Content-Type" "text/event-stream"))
+                   (test-http-keepalive-streaming-body)))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-close"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      (t
+                       (error
+                        "Unexpected bounded close message ~S."
+                        message))))))))
+      (with-test-http-server (server #'handler)
+        (setf
+         transport
+         (make-mcp-streamable-http-transport
+          (test-http-server-url server)
+          :connect-timeout 0.2))
+        (let ((client (make-mcp-client transport)))
+          (mcp-client-connect client)
+          (test-assert
+           (test-wait-until
+            (lambda ()
+              (mcp-http-transport-listener-body transport))
+            1.0)
+           "The idle response body became owned by the listener.")
+          (sleep 0.4)
+          (test-assert
+           (thread-alive-p
+            (mcp-http-transport-listener-thread transport))
+           "An established idle stream has no finite read timeout.")
+          (let* ((started (get-internal-real-time))
+                 (ignored (mcp-client-close client))
+                 (elapsed
+                   (/
+                    (- (get-internal-real-time) started)
+                    internal-time-units-per-second)))
+            (declare (ignore ignored))
+            (test-assert
+             (< elapsed 1.5)
+             "Closing an idle listener remained bounded."))
+          (test-equal 1 delete-count)
+          (test-assert listener-stopped-before-delete-p)
+          (test-assert
+           (null
+            (mcp-http-transport-listener-thread transport)))
+          (test-assert
+           (null
+            (mcp-http-transport-listener-body transport))))))))
+
+(define-test http-detach-stops-idle-listener-without-delete-or-fd-leak
+  (let ((delete-count 0)
+        (initialize-count 0))
+    (labels ((handler (server request)
+               "Hold one idle GET open for each detached session."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (incf delete-count)
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (values
+                   200
+                   (list
+                    (cons "Content-Type" "text/event-stream"))
+                   (test-http-keepalive-streaming-body)))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (incf initialize-count)
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons
+                          "Mcp-Session-Id"
+                          (format nil
+                                  "session-detach-~D"
+                                  initialize-count)))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      (t
+                       (error
+                        "Unexpected detach message ~S."
+                        message))))))))
+      (with-test-http-server (server #'handler)
+        (let* ((before (test-open-file-descriptor-count))
+               (transport
+                 (make-mcp-streamable-http-transport
+                  (test-http-server-url server)))
+               (client (make-mcp-client transport)))
+          (dotimes (index 6)
+            (declare (ignore index))
+            (mcp-client-connect client)
+            (test-assert
+             (test-wait-until
+              (lambda ()
+                (mcp-http-transport-listener-body transport))
+              1.0)
+             "The detached session established its idle GET.")
+            (mcp-client-detach client)
+            (test-assert
+             (null
+              (mcp-http-transport-listener-thread transport)))
+            (test-assert
+             (null
+              (mcp-http-transport-listener-body transport))))
+          (test-equal 0 delete-count)
+          (test-equal 6 initialize-count)
+          (test-assert
+           (test-wait-until
+            (lambda ()
+              (with-lock-held
+                  ((test-http-server-lock server))
+                (notany
+                 #'thread-alive-p
+                 (test-http-server-worker-threads server))))
+            2.0)
+           "Every detached HTTP fixture connection closed.")
+          (let ((after (test-open-file-descriptor-count)))
+            (test-assert
+             (<= (- after before) 2)
+             "Detached idle listeners must not leak file descriptors.")))))))
+
+(define-test http-bounds-sse-retry-values
+  (dolist (value '("0" "1" "60000" "00060000"))
+    (test-assert
+     (mcp-http--valid-retry-value-p value)))
+  (dolist (value '("" "60001" "99999999" "123456789" "1x"))
+    (test-assert
+     (not (mcp-http--valid-retry-value-p value)))))
+
+(define-test http-idle-get-rejects-json-rpc-responses
+  (labels ((handler (server request)
+             "Emit a forbidden response through the idle GET stream."
+             (declare (ignore server))
+             (cond
+               ((string= (test-http-request-method request) "DELETE")
+                (values 202 nil ""))
+               ((string= (test-http-request-method request) "GET")
+                (values
+                 200
+                 (list
+                  (cons "Content-Type" "text/event-stream"))
+                 (test-sse-body
+                  (test-rpc-result
+                   (test-http-ping-request 808)
+                   (json-object)))))
+               (t
+                (let* ((message
+                         (json-decode
+                          (test-http-request-body request)))
+                       (method (json-get message "method")))
+                  (cond
+                    ((string= method "initialize")
+                     (values
+                      200
+                      (list
+                       (cons "Content-Type" "application/json")
+                       (cons "Mcp-Session-Id" "session-response"))
+                      (test-json-response-body
+                       message (test-initialize-result))))
+                    ((string= method "notifications/initialized")
+                     (values 202 nil ""))
+                    (t
+                     (error
+                      "Unexpected idle response message ~S."
+                      message))))))))
+    (with-test-http-server (server #'handler)
+      (let* ((transport
+               (make-mcp-streamable-http-transport
+                (test-http-server-url server)))
+             (client (make-mcp-client transport)))
+        (unwind-protect
+             (progn
+               (mcp-client-connect client)
+               (test-assert
+                (test-wait-until
+                 (lambda ()
+                   (mcp-http-transport-listener-failure transport))
+                 1.0)
+                "The idle listener rejected the response message.")
+               (test-assert
+                (typep
+                 (mcp-http-transport-listener-failure transport)
+                 'mcp-protocol-error))
+               (test-assert
+                (search
+                 "emitted a JSON-RPC response"
+                 (mcp-error-message
+                  (mcp-http-transport-listener-failure
+                   transport)))))
+          (mcp-client-close client))))))
+
+(define-test http-idle-get-bounds-consecutive-no-progress-resumptions
+  (let ((idle-get-count 0)
+        (old-limit
+          *mcp-http-idle-no-progress-resumption-limit*)
+        (client nil))
+    (labels ((handler (server request)
+               "Close idle streams without emitting valid events."
+               (declare (ignore server))
+               (cond
+                 ((string= (test-http-request-method request) "DELETE")
+                  (values 202 nil ""))
+                 ((string= (test-http-request-method request) "GET")
+                  (incf idle-get-count)
+                  (values
+                   200
+                   (list
+                    (cons "Content-Type" "text/event-stream"))
+                   (test-sse-resume-body "no-progress" 0)))
+                 (t
+                  (let* ((message
+                           (json-decode
+                            (test-http-request-body request)))
+                         (method (json-get message "method")))
+                    (cond
+                      ((string= method "initialize")
+                       (values
+                        200
+                        (list
+                         (cons "Content-Type" "application/json")
+                         (cons "Mcp-Session-Id" "session-no-progress"))
+                        (test-json-response-body
+                         message (test-initialize-result))))
+                      ((string= method "notifications/initialized")
+                       (values 202 nil ""))
+                      (t
+                       (error
+                        "Unexpected no-progress message ~S."
+                        message))))))))
+      (unwind-protect
+           (progn
+             (setf *mcp-http-idle-no-progress-resumption-limit* 3)
+             (with-test-http-server (server #'handler)
+               (let ((transport
+                       (make-mcp-streamable-http-transport
+                        (test-http-server-url server))))
+                 (setf client (make-mcp-client transport))
+                 (unwind-protect
+                      (progn
+                        (mcp-client-connect client)
+                        (test-assert
+                         (test-wait-until
+                          (lambda ()
+                            (mcp-http-transport-listener-failure
+                             transport))
+                          1.0)
+                         "The no-progress resumption bound fired.")
+                        (test-equal 3 idle-get-count)
+                        (test-assert
+                         (search
+                          "no-progress limit"
+                          (mcp-error-message
+                           (mcp-http-transport-listener-failure
+                            transport)))))
+                   (mcp-client-close client)
+                   (setf client nil)))))
+        (when client
+          (mcp-client-close client))
+        (setf
+         *mcp-http-idle-no-progress-resumption-limit*
+         old-limit)))))

@@ -330,6 +330,14 @@
     :documentation "The request body."))
   (:documentation "One request observed by the local HTTP fixture."))
 
+(defclass test-http-streaming-body ()
+  ((writer
+    :initarg :writer
+    :reader test-http-streaming-body-writer
+    :type function
+    :documentation "The function writing a response body to its live stream."))
+  (:documentation "A fixture response body written after headers are flushed."))
+
 (defclass test-http-server ()
   ((socket
     :initarg :socket
@@ -442,28 +450,40 @@
     (204 "No Content")
     (302 "Found")
     (404 "Not Found")
+    (405 "Method Not Allowed")
     (500 "Internal Server Error")
     (t "Test Response")))
 
-(-> test-http--write-response (stream integer list string) null)
+(-> make-test-http-streaming-body (function) test-http-streaming-body)
+(defun make-test-http-streaming-body (writer)
+  "Return a streaming fixture response body using WRITER."
+  (make-instance 'test-http-streaming-body :writer writer))
+
+(-> test-http--write-response (stream integer list t) null)
 (defun test-http--write-response (stream status headers body)
   "Write one HTTP response to STREAM."
   (format stream "HTTP/1.1 ~D ~A~C~C"
           status (test-http--reason status)
           #\Return #\Newline)
-  (dolist (header
-           (append
-            headers
-            (list
-             (cons "Content-Length"
-                   (write-to-string (length body)))
-             (cons "Connection" "close"))))
+  (dolist
+      (header
+       (append
+        headers
+        (unless (typep body 'test-http-streaming-body)
+          (list
+           (cons "Content-Length"
+                 (write-to-string (length body)))))
+        (list (cons "Connection" "close"))))
     (format stream "~A: ~A~C~C"
             (first header) (rest header)
             #\Return #\Newline))
   (format stream "~C~C" #\Return #\Newline)
-  (write-string body stream)
   (finish-output stream)
+  (if (typep body 'test-http-streaming-body)
+      (funcall (test-http-streaming-body-writer body) stream)
+      (progn
+        (write-string body stream)
+        (finish-output stream)))
   nil)
 
 (-> test-http--serve-connection (test-http-server t) null)
