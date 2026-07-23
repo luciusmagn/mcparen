@@ -1084,6 +1084,41 @@
      (getf (mcp-stdio--launch-arguments transport) :directory)
      :test #'equal)))
 
+(define-test stdio-launches-with-an-explicit-utf-8-external-format
+  (let ((transport
+          (make-mcp-stdio-transport "/bin/true")))
+    (test-equal
+     ':utf-8
+     (getf (mcp-stdio--launch-arguments transport) :external-format))))
+
+(define-test stdio-round-trips-non-ascii-text
+  (let* ((transport (make-test-stdio-transport))
+         (client
+           (make-mcp-client
+            transport
+            :startup-timeout 3
+            :tool-timeout 2))
+         (text "Příliš žluťoučký kůň úpěl ďábelské ódy 😀"))
+    (unwind-protect
+         (let ((result
+                 (mcp-client-call-tool
+                  client
+                  "utf8"
+                  (json-object "text" text))))
+           (test-equal
+            text
+            (json-get
+             (first (mcp-call-result-content result))
+             "text")
+            :test #'string=)
+           (test-equal
+            text
+            (json-get
+             (mcp-call-result-structured-content result)
+             "echo")
+            :test #'string=))
+      (mcp-client-close client))))
+
 (define-test stdio-retains-bounded-stderr-tail
   (let* ((transport (make-test-stdio-transport))
          (client

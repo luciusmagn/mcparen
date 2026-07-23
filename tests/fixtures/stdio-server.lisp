@@ -196,6 +196,14 @@
             (delayed-tool-response request name 0.01))
            ((string= name "never")
             nil)
+           ((string= name "utf8")
+            (write-json
+             (response
+              request
+              (text-result
+               (json-get
+                (json-get params "arguments")
+                "text")))))
            ((string= name "stderr-flood")
             (flood-stderr)
             (write-json

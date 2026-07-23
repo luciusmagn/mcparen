@@ -593,6 +593,7 @@ follow a caller's current workspace without rebuilding the transport."
      (list :input :stream
            :output :stream
            :error-output :stream
+           :external-format :utf-8
            :ignore-error-status t)
      (when directory
        (list :directory directory))
