@@ -282,11 +282,12 @@
 (-> make-test-stdio-transport
     (&key (:maximum-message-characters t)
           (:request-handler t)
-          (:notification-handler t))
+          (:notification-handler t)
+          (:ingress-projector t))
     mcp-stdio-transport)
 (defun make-test-stdio-transport
     (&key maximum-message-characters
-      request-handler notification-handler)
+      request-handler notification-handler ingress-projector)
   "Return a stdio transport connected to the local Common Lisp fixture."
   (make-mcp-stdio-transport
    (namestring sb-ext:*runtime-pathname*)
@@ -299,7 +300,12 @@
    (or maximum-message-characters
        *mcp-maximum-message-characters*)
    :request-handler request-handler
-   :notification-handler notification-handler))
+   :notification-handler notification-handler
+   :ingress-projector
+   (or ingress-projector
+       (lambda (kind value)
+         (declare (ignore kind))
+         value))))
 
 
 ;;;; -- Local HTTP Fixture --

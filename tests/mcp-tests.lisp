@@ -1482,6 +1482,121 @@
              *mcp-stdio-diagnostic-limit*)))
       (mcp-client-close client))))
 
+(define-test stdio-projects-inbound-data-before-retention
+  (let* ((received-method nil)
+         (received-params nil)
+         (input (make-string-output-stream))
+         (transport
+           (make-mcp-stdio-transport
+            "/bin/true"
+            :notification-handler
+            (lambda (method params)
+              (setf received-method method
+                    received-params params))
+            :ingress-projector
+            (lambda (kind value)
+              (ecase kind
+                (:stderr
+                 (unless (search "drop" value)
+                   "projected stderr"))
+                (:reader-failure
+                 "projected reader failure")
+                (:response
+                 (json-object
+                  "jsonrpc" "2.0"
+                  "id" (json-get value "id")
+                  "result" (json-object "value" "projected response")))
+                (:request
+                 nil)
+                (:notification
+                 (unless
+                     (string=
+                      (json-get value "method")
+                      "notifications/drop")
+                   (json-object
+                    "jsonrpc" "2.0"
+                    "method" "notifications/projected"
+                    "params" (json-object "value" "projected params")))))))))
+    (setf (mcp-stdio-transport-input transport) input
+          (mcp-stdio-transport-callback-stopping-p transport) nil)
+    (mcp-stdio--append-stderr transport "raw stderr")
+    (mcp-stdio--append-stderr transport "drop stderr")
+    (test-equal
+     "projected stderr"
+     (mcp-stdio-transport-stderr-text transport)
+     :test #'string=)
+    (let* ((raw-params (json-object "value" "raw params"))
+           (raw-notification
+             (json-object
+              "jsonrpc" "2.0"
+              "method" "notifications/raw"
+              "params" raw-params)))
+      (mcp-stdio--dispatch-message transport raw-notification)
+      (setf (gethash "value" raw-params) "mutated raw params")
+      (funcall (pop (mcp-stdio-transport-callback-queue transport)))
+      (test-equal
+       "notifications/projected" received-method :test #'string=)
+      (test-equal
+       "projected params"
+       (json-get received-params "value")
+       :test #'string=)
+      (test-assert (not (eq raw-params received-params))))
+    (mcp-stdio--dispatch-message
+     transport
+     (json-object
+      "jsonrpc" "2.0"
+      "method" "notifications/drop"
+      "params" (json-object "value" "raw dropped params")))
+    (test-assert
+     (null (mcp-stdio-transport-callback-queue transport)))
+    (let* ((identifier 77)
+           (pending (make-instance 'mcp-stdio-pending-request))
+           (raw-result (json-object "value" "raw response"))
+           (raw-response
+             (json-object
+              "jsonrpc" "2.0"
+              "id" identifier
+              "result" raw-result)))
+      (setf
+       (gethash
+        identifier
+        (mcp-stdio-transport-pending-requests transport))
+       pending)
+      (mcp-stdio--dispatch-message transport raw-response)
+      (let ((projected-response
+              (mcp-stdio-pending-response pending)))
+        (test-assert (not (eq raw-response projected-response)))
+        (test-assert
+         (not
+          (eq raw-result (json-get projected-response "result"))))
+        (test-equal
+         "projected response"
+         (json-get (json-get projected-response "result") "value")
+         :test #'string=)))
+    (mcp-stdio--dispatch-message
+     transport
+     (json-object
+      "jsonrpc" "2.0"
+      "id" "private request identifier"
+      "method" "private/request"
+      "params" (json-object "value" "private request params")))
+    (test-assert
+     (search
+      "The MCP client filtered this server request."
+      (get-output-stream-string input)))
+    (test-assert
+     (null (mcp-stdio-transport-callback-queue transport)))
+    (mcp-stdio--record-reader-failure
+     transport
+     (make-condition
+      'simple-error
+      :format-control "raw reader failure"
+      :format-arguments nil))
+    (test-equal
+     "projected reader failure"
+     (mcp-stdio-transport-reader-failure transport)
+     :test #'string=)))
+
 (define-test stdio-rejects-oversized-stdout-before-json-decoding
   (let* ((limit 4096)
          (transport

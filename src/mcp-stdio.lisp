@@ -77,6 +77,15 @@
     :reader mcp-stdio-transport-notification-handler
     :type t
     :documentation "An optional function receiving server notification method and params.")
+   (ingress-projector
+    :initarg :ingress-projector
+    :initform (lambda (kind value)
+                (declare (ignore kind))
+                value)
+    :reader mcp-stdio-transport-ingress-projector
+    :type function
+    :documentation
+    "A function projecting server data before the transport retains it.")
    (maximum-message-characters
     :initarg :maximum-message-characters
     :initform *mcp-maximum-message-characters*
@@ -186,6 +195,7 @@
                  (:environment-function function)
                  (:request-handler t)
                  (:notification-handler t)
+                 (:ingress-projector function)
                  (:maximum-message-characters integer))
     mcp-stdio-transport)
 (defun make-mcp-stdio-transport
@@ -193,12 +203,23 @@
      &key arguments directory
        (environment-function (constantly nil))
        request-handler notification-handler
+       (ingress-projector
+         (lambda (kind value)
+           (declare (ignore kind))
+           value))
        (maximum-message-characters *mcp-maximum-message-characters*))
   "Create a lazy stdio MCP transport for COMMAND and ARGUMENTS.
 
 DIRECTORY may be a pathname designator or a function returning one. A function
 is called immediately before each process launch, allowing a reconnect to
-follow a caller's current workspace without rebuilding the transport."
+follow a caller's current workspace without rebuilding the transport.
+
+INGRESS-PROJECTOR receives a keyword kind and one decoded or diagnostic value
+before Mcparen retains it. The kinds are :RESPONSE, :REQUEST, :NOTIFICATION,
+:STDERR, and :READER-FAILURE. It may return a detached replacement. NIL drops
+stderr and notifications, drops responses so their callers time out, replaces
+reader failures with a fixed diagnostic, and rejects requests with a JSON-RPC
+method-not-found response. The function must be bounded and thread-safe."
   (unless (and (stringp command) (plusp (length command)))
     (error 'mcp-transport-error
            :message "An MCP stdio command must be a non-empty string."
@@ -215,6 +236,11 @@ follow a caller's current workspace without rebuilding the transport."
            :message "The MCP stdio message limit must be a positive integer."
            :transport nil
            :cause nil))
+  (unless (functionp ingress-projector)
+    (error 'mcp-transport-error
+           :message "An MCP stdio ingress projector must be a function."
+           :transport nil
+           :cause nil))
   (make-instance 'mcp-stdio-transport
                  :command command
                  :arguments (copy-list arguments)
@@ -222,6 +248,7 @@ follow a caller's current workspace without rebuilding the transport."
                  :environment-function environment-function
                  :request-handler request-handler
                  :notification-handler notification-handler
+                 :ingress-projector ingress-projector
                  :maximum-message-characters maximum-message-characters))
 
 (defmethod mcp-transport-open-p ((transport mcp-stdio-transport))
@@ -231,37 +258,85 @@ follow a caller's current workspace without rebuilding the transport."
          (and process
               (uiop:process-alive-p process)))))
 
+(-> mcp-stdio--projection-failure (mcp-stdio-transport keyword) mcp-transport-error)
+(defun mcp-stdio--projection-failure (transport kind)
+  "Return a fixed diagnostic for a failed KIND ingress projection."
+  (make-condition
+   'mcp-transport-error
+   :message
+   (format nil "The MCP stdio ingress projector failed for ~S." kind)
+   :transport transport
+   :cause nil))
+
+(-> mcp-stdio--project-ingress
+    (mcp-stdio-transport keyword t)
+    (values t boolean))
+(defun mcp-stdio--project-ingress (transport kind value)
+  "Project one inbound VALUE of KIND without retaining projector failures."
+  (handler-case
+      (values
+       (funcall
+        (mcp-stdio-transport-ingress-projector transport)
+        kind
+        value)
+       t)
+    (error ()
+      (values (mcp-stdio--projection-failure transport kind) nil))))
+
 (-> mcp-stdio--append-stderr (mcp-stdio-transport string) null)
 (defun mcp-stdio--append-stderr (transport fragment)
   "Append FRAGMENT to TRANSPORT's bounded stderr tail."
-  (with-lock-held ((mcp-stdio-transport-state-lock transport))
-    (let* ((combined
-             (concatenate 'string
-                          (mcp-stdio-transport-stderr-text transport)
-                          fragment))
-           (start (max 0 (- (length combined)
-                            *mcp-stdio-diagnostic-limit*))))
-      (setf (mcp-stdio-transport-stderr-text transport)
-            (subseq combined start))))
+  (multiple-value-bind (projected projected-p)
+      (mcp-stdio--project-ingress transport ':stderr fragment)
+    (cond
+      ((not projected-p)
+       (mcp-stdio--record-reader-failure transport projected))
+      ((null projected)
+       nil)
+      ((stringp projected)
+       (with-lock-held ((mcp-stdio-transport-state-lock transport))
+         (let* ((combined
+                  (concatenate
+                   'string
+                   (mcp-stdio-transport-stderr-text transport)
+                   projected))
+                (start
+                  (max
+                   0
+                   (- (length combined)
+                      *mcp-stdio-diagnostic-limit*))))
+           (setf (mcp-stdio-transport-stderr-text transport)
+                 (subseq combined start)))))
+      (t
+       (mcp-stdio--record-reader-failure
+        transport
+        (mcp-stdio--projection-failure transport ':stderr)))))
   nil)
 
 (-> mcp-stdio--record-reader-failure (mcp-stdio-transport t) null)
 (defun mcp-stdio--record-reader-failure (transport failure)
   "Publish terminal reader FAILURE unless TRANSPORT is deliberately closing."
-  (with-lock-held ((mcp-stdio-transport-state-lock transport))
-    (unless (mcp-stdio-transport-closing-p transport)
-      (setf (mcp-stdio-transport-reader-failure transport) failure
-            (mcp-stdio-transport-open-p transport) nil
-            (mcp-stdio-transport-callback-stopping-p transport) t
-            (mcp-stdio-transport-callback-queue transport) nil)
-      (condition-notify
-       (mcp-stdio-transport-callback-condition-variable transport))
-      (maphash
-       (lambda (identifier pending)
-         (declare (ignore identifier))
-         (condition-notify
-          (mcp-stdio-pending-condition-variable pending)))
-       (mcp-stdio-transport-pending-requests transport))))
+  (multiple-value-bind (projected projected-p)
+      (mcp-stdio--project-ingress transport ':reader-failure failure)
+    (let ((diagnostic
+            (if (and projected-p projected)
+                projected
+                (mcp-stdio--projection-failure
+                 transport ':reader-failure))))
+      (with-lock-held ((mcp-stdio-transport-state-lock transport))
+        (unless (mcp-stdio-transport-closing-p transport)
+          (setf (mcp-stdio-transport-reader-failure transport) diagnostic
+                (mcp-stdio-transport-open-p transport) nil
+                (mcp-stdio-transport-callback-stopping-p transport) t
+                (mcp-stdio-transport-callback-queue transport) nil)
+          (condition-notify
+           (mcp-stdio-transport-callback-condition-variable transport))
+          (maphash
+           (lambda (identifier pending)
+             (declare (ignore identifier))
+             (condition-notify
+              (mcp-stdio-pending-condition-variable pending)))
+           (mcp-stdio-transport-pending-requests transport))))))
   nil)
 
 (-> mcp-stdio--deadline (real) integer)
@@ -456,39 +531,79 @@ follow a caller's current workspace without rebuilding the transport."
               transport response-cause))))))
   nil))
 
+(-> mcp-stdio--project-message
+    (mcp-stdio-transport keyword hash-table)
+    (or null hash-table))
+(defun mcp-stdio--project-message (transport kind message)
+  "Return a valid projected server MESSAGE of KIND, or NIL when dropped."
+  (multiple-value-bind (projected projected-p)
+      (mcp-stdio--project-ingress transport kind message)
+    (unless projected-p
+      (error projected))
+    (when projected
+      (unless
+          (handler-case
+              (and
+               (hash-table-p projected)
+               (eq (json-rpc-message-validate projected) kind))
+            (error ()
+              nil))
+        (error (mcp-stdio--projection-failure transport kind))))
+    projected))
+
 (-> mcp-stdio--dispatch-message (mcp-stdio-transport t) null)
 (defun mcp-stdio--dispatch-message (transport message)
   "Dispatch one decoded server MESSAGE as a response, request, or notification."
   (ecase (json-rpc-message-validate message)
     (:response
-     (let ((identifier (json-get message "id")))
-       (with-lock-held ((mcp-stdio-transport-state-lock transport))
-         (let ((pending
-                 (gethash
-                  identifier
-                  (mcp-stdio-transport-pending-requests transport))))
-           (when pending
-             (setf (mcp-stdio-pending-response pending) message)
-             (condition-notify
-              (mcp-stdio-pending-condition-variable pending)))))))
+     (let ((projected
+             (mcp-stdio--project-message transport ':response message)))
+       (when projected
+         (let ((identifier (json-get projected "id")))
+           (with-lock-held ((mcp-stdio-transport-state-lock transport))
+             (let ((pending
+                     (gethash
+                      identifier
+                      (mcp-stdio-transport-pending-requests transport))))
+               (when pending
+                 (setf (mcp-stdio-pending-response pending) projected)
+                 (condition-notify
+                  (mcp-stdio-pending-condition-variable pending)))))))))
     (:request
-     (mcp-stdio--handle-server-request transport message))
+     (let ((projected
+             (mcp-stdio--project-message transport ':request message)))
+       (if projected
+           (mcp-stdio--handle-server-request transport projected)
+           (mcp-stdio--write-message
+            transport
+            (mcp-stdio--server-error-response
+             (json-get message "id")
+             -32601
+             "The MCP client filtered this server request.")
+            (mcp-stdio--deadline *mcp-stdio-callback-write-timeout*)
+            *mcp-stdio-callback-write-timeout*
+            "MCP stdio filtered server response"))))
     (:notification
-     (let ((handler
-             (mcp-stdio-transport-notification-handler transport))
-           (method (json-get message "method")))
-       (when handler
-         (mcp-stdio--enqueue-callback
-          transport
-          (lambda ()
-            (handler-case
-                (funcall handler method (json-get message "params"))
-              (error (cause)
-                (mcp-stdio--append-stderr
-                 transport
-                 (format nil
-                         "notification handler for ~A failed: ~A~%"
-                         method cause))))))))))
+     (let ((projected
+             (mcp-stdio--project-message
+              transport ':notification message)))
+       (when projected
+         (let ((handler
+                 (mcp-stdio-transport-notification-handler transport))
+               (method (json-get projected "method"))
+               (params (json-get projected "params")))
+           (when handler
+             (mcp-stdio--enqueue-callback
+              transport
+              (lambda ()
+                (handler-case
+                    (funcall handler method params)
+                  (error (cause)
+                    (mcp-stdio--append-stderr
+                     transport
+                     (format nil
+                             "notification handler for ~A failed: ~A~%"
+                             method cause))))))))))))
   nil)
 
 (-> mcp-stdio--reader-loop (mcp-stdio-transport) null)

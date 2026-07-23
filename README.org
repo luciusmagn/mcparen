@@ -113,6 +113,15 @@ bounded callback worker handles server requests and notifications. Reader
 threads, writes, message sizes, and stderr capture are bounded as well. Closing
 or detaching a transport discards retained server diagnostics.
 
+=make-mcp-stdio-transport= accepts an optional =:ingress-projector=. Mcparen
+calls it synchronously before retaining each decoded response, request, or
+notification and before retaining stderr or a reader failure. The projector
+receives a kind keyword and value and returns either that value or a detached
+replacement. It may return =nil= to drop stderr or a notification, make a
+response time out, replace a reader failure with a fixed diagnostic, or reject
+a server request with a JSON-RPC method-not-found response. Projectors must be
+bounded and thread-safe.
+
 Streamable HTTP requests share one absolute deadline across their initial POST,
 server callbacks, retry delay, and resumed SSE GET requests. A local timeout is
 reported as =mcp-timeout= so the client can send =notifications/cancelled=.

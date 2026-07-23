@@ -91,6 +91,7 @@
            #:mcp-stdio-transport-command
            #:mcp-stdio-transport-directory
            #:mcp-stdio-transport-environment-function
+           #:mcp-stdio-transport-ingress-projector
            #:mcp-stdio-transport-maximum-message-characters
            #:mcp-stdio-transport-stderr-text
            #:mcp-streamable-http-transport
