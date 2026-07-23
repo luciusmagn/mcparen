@@ -77,6 +77,32 @@
             :test #'string=))
       (mcp-client-close client))))
 
+(define-test client-connection-generation-tracks-lifecycle
+  (let* ((transport
+           (make-test-scripted-transport #'test-default-handler))
+         (client (make-mcp-client transport)))
+    (test-equal 0 (mcp-client-connection-generation client))
+    (unwind-protect
+         (progn
+           (mcp-client-connect client)
+           (test-equal
+            1
+            (mcp-client-connection-generation client))
+           (mcp-client-connect client)
+           (test-equal
+            1
+            (mcp-client-connection-generation client))
+           (mcp-client-close client)
+           (test-equal
+            2
+            (mcp-client-connection-generation client))
+           (mcp-client-connect client)
+           (test-equal
+            3
+            (mcp-client-connection-generation client)))
+      (when (mcp-client-connected-p client)
+        (mcp-client-close client)))))
+
 (define-test client-follows-tool-and-resource-pagination
   (labels ((tool (name description &optional annotations)
              "Return one valid MCP tool object."
@@ -2559,17 +2585,25 @@
                   transport
                   :startup-timeout 3)))
           (unwind-protect
-               (let ((resources
-                       (mcp-client-list-resources client)))
-                 (test-equal 2 initialize-count)
-                 (test-assert expired-p)
+               (progn
+                 (mcp-client-connect client)
                  (test-equal
-                  "fixture:///after-reconnect"
-                  (json-get (first resources) "uri")
-                  :test #'string=)
-                 (test-equal
-                  "session-new"
-                  (mcp-http-transport-session-identifier
-                   transport)
-                  :test #'string=))
+                  1
+                 (mcp-client-connection-generation client))
+                 (let ((resources
+                         (mcp-client-list-resources client)))
+                   (test-equal 2 initialize-count)
+                   (test-assert expired-p)
+                   (test-equal
+                    2
+                    (mcp-client-connection-generation client))
+                   (test-equal
+                    "fixture:///after-reconnect"
+                    (json-get (first resources) "uri")
+                    :test #'string=)
+                   (test-equal
+                    "session-new"
+                    (mcp-http-transport-session-identifier
+                     transport)
+                    :test #'string=)))
             (mcp-client-close client)))))))

@@ -214,7 +214,7 @@
     :documentation "The next positive JSON-RPC request identifier.")
    (connection-generation
     :initform 0
-    :accessor mcp-client-connection-generation
+    :accessor mcp-client--connection-generation
     :type (integer 0)
     :documentation "The generation distinguishing reinitialized sessions.")
    (connected-p
@@ -287,6 +287,12 @@
                    :client-capabilities capabilities
                    :startup-timeout startup-timeout
                    :tool-timeout tool-timeout)))
+
+(-> mcp-client-connection-generation (mcp-client) integer)
+(defun mcp-client-connection-generation (client)
+  "Return CLIENT's current connection generation under its lifecycle lock."
+  (with-lock-held ((mcp-client-lock client))
+    (mcp-client--connection-generation client)))
 
 (-> mcp-client--next-identifier-unlocked (mcp-client) integer)
 (defun mcp-client--next-identifier-unlocked (client)
@@ -434,7 +440,7 @@
      (mcp-client--notification "notifications/initialized")
      (mcp-client-startup-timeout client))
     (setf (mcp-client-connected-p client) t)
-    (incf (mcp-client-connection-generation client))
+    (incf (mcp-client--connection-generation client))
     client))
 
 (-> mcp-client--connect-unlocked (mcp-client) mcp-client)
@@ -476,7 +482,7 @@
             (mcp-client-server-capabilities client) nil
             (mcp-client-server-info client) nil
             (mcp-client-instructions client) nil)
-      (incf (mcp-client-connection-generation client))))
+      (incf (mcp-client--connection-generation client))))
   nil)
 
 (-> mcp-client-detach (mcp-client) null)
@@ -489,7 +495,7 @@
           (mcp-client-server-capabilities client) nil
           (mcp-client-server-info client) nil
           (mcp-client-instructions client) nil)
-    (incf (mcp-client-connection-generation client)))
+    (incf (mcp-client--connection-generation client)))
   nil)
 
 (defmacro with-mcp-client ((variable client) &body body)
@@ -510,13 +516,13 @@
   (multiple-value-bind (identifier generation)
       (with-lock-held ((mcp-client-lock client))
         (values (mcp-client--next-identifier-unlocked client)
-                (mcp-client-connection-generation client)))
+                (mcp-client--connection-generation client)))
     (handler-case
         (mcp-client--request-with-identifier
          client method params timeout identifier)
       (mcp-session-expired ()
         (with-lock-held ((mcp-client-lock client))
-          (when (= generation (mcp-client-connection-generation client))
+          (when (= generation (mcp-client--connection-generation client))
             (mcp-transport-close (mcp-client-transport client))
             (setf (mcp-client-connected-p client) nil)
             (mcp-client--connect-unlocked client)))
@@ -596,8 +602,7 @@
   (let ((restart-marker (gensym "MCP-PAGINATION-RESTART-")))
     (labels ((generation ()
                "Return CLIENT's current connection generation."
-               (with-lock-held ((mcp-client-lock client))
-                 (mcp-client-connection-generation client)))
+               (mcp-client-connection-generation client))
 
              (read-session (initial-generation)
                "Read one paginated list within INITIAL-GENERATION."

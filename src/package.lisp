@@ -45,6 +45,7 @@
            #:mcp-client-client-info
            #:mcp-client-close
            #:mcp-client-connect
+           #:mcp-client-connection-generation
            #:mcp-client-connected-p
            #:mcp-client-detach
            #:mcp-client-get-prompt
