@@ -42,6 +42,15 @@
     :documentation "The non-secret protocol payload that failed validation."))
   (:documentation "An invalid or unsupported MCP protocol exchange."))
 
+(define-condition mcp-task-execution-unsupported (mcp-protocol-error)
+  ((tool
+    :initarg :tool
+    :reader mcp-task-execution-unsupported-tool
+    :type t
+    :documentation "The discovered MCP tool that requires task execution."))
+  (:documentation
+   "An MCP tool requires task execution that this client does not implement."))
+
 (define-condition mcp-message-too-large (mcp-protocol-error)
   ((source
     :initarg :source

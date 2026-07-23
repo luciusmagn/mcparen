@@ -479,7 +479,9 @@
       (unwind-protect
            (let* ((result
                     (mcp-client-call-tool
-                     client "mixed" (json-object "input" "x")))
+                     client
+                     (test-tool "mixed")
+                     (json-object "input" "x")))
                   (rendered (mcp-call-result-text result)))
              (test-equal 3 (length (mcp-call-result-content result)))
              (test-assert
@@ -761,6 +763,152 @@
       (test-signals mcp-protocol-error
         (mcp-client--raw->tool tool)))))
 
+(define-test tool-execution-validates-task-support
+  (let ((tool (test-tool "absent-execution")))
+    (test-assert (null (mcp-tool-execution tool)))
+    (test-equal
+     "forbidden"
+     (mcp-tool-task-support tool)
+     :test #'string=)
+    (test-assert (not (mcp-tool-task-required-p tool))))
+  (let* ((execution (json-object))
+         (tool
+           (test-tool
+            "implicit-forbidden"
+            :execution execution)))
+    (test-assert (eq execution (mcp-tool-execution tool)))
+    (test-equal
+     "forbidden"
+     (mcp-tool-task-support tool)
+     :test #'string=))
+  (dolist (task-support '("forbidden" "optional" "required"))
+    (let* ((execution
+             (json-object "taskSupport" task-support))
+           (tool
+             (test-tool
+              task-support
+              :execution execution)))
+      (test-assert (eq execution (mcp-tool-execution tool)))
+      (test-equal
+       task-support
+       (mcp-tool-task-support tool)
+       :test #'string=)
+      (test-equal
+       (string= task-support "required")
+       (mcp-tool-task-required-p tool))))
+  (dolist (invalid-execution
+           (list nil :null yason:false #() "required"))
+    (test-signals mcp-protocol-error
+      (test-tool
+       "invalid-execution"
+       :execution invalid-execution)))
+  (dolist (invalid-task-support
+           (list nil
+                 :null
+                 yason:false
+                 #()
+                 7
+                 "Required"
+                 "OPTIONAL"
+                 "allowed"))
+    (test-signals mcp-protocol-error
+      (test-tool
+       "invalid-task-support"
+       :execution
+       (json-object
+        "taskSupport" invalid-task-support)))))
+
+(define-test tool-call-rejects-required-task-before-transport-io
+  (let* ((transport
+           (make-test-scripted-transport
+            (lambda (ignored-transport ignored-request)
+              (declare (ignore ignored-transport ignored-request))
+              (error "A rejected task tool reached the transport."))))
+         (client (make-mcp-client transport))
+         (tool
+           (test-tool
+            "required-task"
+            :execution
+            (json-object "taskSupport" "required"))))
+    (let ((condition
+            (test-signals mcp-task-execution-unsupported
+              (mcp-client-call-tool client tool (json-object)))))
+      (test-assert
+       (eq tool
+           (mcp-task-execution-unsupported-tool condition)))
+      (test-equal
+       "tools/call"
+       (mcp-protocol-error-method condition)
+       :test #'string=)
+      (test-assert
+       (eq (mcp-tool-raw tool)
+           (mcp-protocol-error-payload condition))))
+    (test-assert
+     (not (test-scripted-transport-open-p transport)))
+    (test-assert
+     (null (test-scripted-transport-requests transport)))
+    (test-assert
+     (null (test-scripted-transport-notifications transport)))
+    (test-equal
+     0
+     (test-scripted-transport-close-count transport))))
+
+(define-test tool-call-allows-forbidden-and-optional-task-support
+  (labels ((handler (transport request)
+             "Initialize or echo the called tool name."
+             (declare (ignore transport))
+             (let ((method (json-get request "method")))
+               (cond
+                 ((string= method "initialize")
+                  (test-rpc-result request (test-initialize-result)))
+                 ((string= method "tools/call")
+                  (test-rpc-result
+                   request
+                   (json-object
+                    "content"
+                    (vector
+                     (json-object
+                      "type" "text"
+                      "text"
+                      (json-get
+                       (json-get request "params")
+                       "name"))))))
+                 (t
+                  (error "Unexpected method ~S." method))))))
+    (let* ((transport (make-test-scripted-transport #'handler))
+           (client (make-mcp-client transport))
+           (forbidden
+             (test-tool
+              "forbidden"
+              :execution
+              (json-object "taskSupport" "forbidden")))
+           (optional
+             (test-tool
+              "optional"
+              :execution
+              (json-object "taskSupport" "optional"))))
+      (unwind-protect
+           (progn
+             (test-equal
+              "forbidden"
+              (json-get
+               (first
+                (mcp-call-result-content
+                 (mcp-client-call-tool
+                  client forbidden (json-object))))
+               "text")
+              :test #'string=)
+             (test-equal
+              "optional"
+              (json-get
+               (first
+                (mcp-call-result-content
+                 (mcp-client-call-tool
+                  client optional (json-object))))
+               "text")
+              :test #'string=))
+        (mcp-client-close client)))))
+
 (define-test tool-call-rejects-malformed-error-boolean
   (labels ((handler (transport request)
              "Return malformed isError metadata for one tool call."
@@ -776,7 +924,10 @@
            (client (make-mcp-client transport)))
       (unwind-protect
            (test-signals mcp-protocol-error
-             (mcp-client-call-tool client "malformed" (json-object)))
+             (mcp-client-call-tool
+              client
+              (test-tool "malformed")
+              (json-object)))
         (mcp-client-close client)))))
 
 (define-test tool-call-validates-content-and-structured-result
@@ -797,7 +948,9 @@
                (unwind-protect
                     (test-signals mcp-protocol-error
                       (mcp-client-call-tool
-                       client "malformed" (json-object)))
+                       client
+                       (test-tool "malformed")
+                       (json-object)))
                  (mcp-client-close client)))))
     (dolist
         (result
@@ -950,7 +1103,9 @@
             (test-start-thread
              (lambda ()
                (mcp-client-call-tool
-                client "slow" (json-object)))
+                client
+                (test-tool "slow")
+                (json-object)))
              "mcparen slow fixture call"))
            (test-assert
             (test-wait-until
@@ -964,7 +1119,9 @@
             (test-start-thread
              (lambda ()
                (mcp-client-call-tool
-                client "fast" (json-object)))
+                client
+                (test-tool "fast")
+                (json-object)))
              "mcparen fast fixture call"))
            (test-equal
             "fast"
@@ -1000,7 +1157,9 @@
            (let ((condition
                    (test-signals mcp-timeout
                      (mcp-client-call-tool
-                      client "never" (json-object)
+                      client
+                      (test-tool "never")
+                      (json-object)
                       :timeout 0.1))))
              (test-equal "JSON-RPC request"
                          (mcp-timeout-operation condition)
@@ -1103,7 +1262,7 @@
          (let ((result
                  (mcp-client-call-tool
                   client
-                  "utf8"
+                  (test-tool "utf8")
                   (json-object "text" text))))
            (test-equal
             text
@@ -1134,7 +1293,9 @@
              (first
               (mcp-call-result-content
                (mcp-client-call-tool
-                client "stderr-flood" (json-object))))
+                client
+                (test-tool "stderr-flood")
+                (json-object))))
              "text")
             :test #'string=)
            (test-assert
@@ -1168,7 +1329,9 @@
              (first
               (mcp-call-result-content
                (mcp-client-call-tool
-                client "stderr-long-line" (json-object))))
+                client
+                (test-tool "stderr-long-line")
+                (json-object))))
              "text")
             :test #'string=)
            (test-assert
@@ -1199,7 +1362,9 @@
          (let ((condition
                  (test-signals mcp-message-too-large
                    (mcp-client-call-tool
-                    client "oversized-stdout" (json-object)))))
+                    client
+                    (test-tool "oversized-stdout")
+                    (json-object)))))
            (test-equal limit
                        (mcp-message-too-large-limit condition))
            (test-assert
@@ -1225,7 +1390,9 @@
                   (mcp-stdio-transport-process transport)))
            (test-signals mcp-error
              (mcp-client-call-tool
-              client "malformed-stdout" (json-object)))
+              client
+              (test-tool "malformed-stdout")
+              (json-object)))
            (test-assert
             (not (mcp-transport-open-p transport))
             "A terminal reader failure must make the process unusable.")
@@ -1273,7 +1440,9 @@
                (first
                 (mcp-call-result-content
                  (mcp-client-call-tool
-                  client "callback-order" (json-object))))
+                  client
+                  (test-tool "callback-order")
+                  (json-object))))
                "text")
               :test #'string=)
              (test-assert
@@ -1306,7 +1475,9 @@
          (progn
            (test-signals mcp-error
              (mcp-client-call-tool
-              client "callback-overflow" (json-object)))
+              client
+              (test-tool "callback-overflow")
+              (json-object)))
            (test-assert
             (not (mcp-transport-open-p transport))
             "Overflow must fail instead of spawning or retaining unbounded work."))
@@ -1352,7 +1523,9 @@
       (unwind-protect
            (let ((result
                    (mcp-client-call-tool
-                    client "server-request" (json-object))))
+                    client
+                    (test-tool "server-request")
+                    (json-object))))
              (test-equal
               "assistant"
               (json-get
@@ -1397,7 +1570,9 @@
     (unwind-protect
          (let* ((result
                   (mcp-client-call-tool
-                   client "spawn-child" (json-object)))
+                   client
+                   (test-tool "spawn-child")
+                   (json-object)))
                 (structured
                   (mcp-call-result-structured-content result)))
            (setf child-identifier (json-get structured "pid"))
@@ -1949,7 +2124,9 @@
                  (mcp-client-connect client)
                  (test-signals mcp-timeout
                    (mcp-client-call-tool
-                    client "delayed" (json-object)
+                    client
+                    (test-tool "delayed")
+                    (json-object)
                     :timeout 0.08))
                  (test-assert
                   (test-wait-until

@@ -80,6 +80,8 @@
            #:mcp-rpc-error-code
            #:mcp-rpc-error-data
            #:mcp-session-expired
+           #:mcp-task-execution-unsupported
+           #:mcp-task-execution-unsupported-tool
            #:mcp-stdio-transport
            #:mcp-stdio-transport-arguments
            #:mcp-stdio-transport-command
@@ -95,11 +97,14 @@
            #:mcp-tool-annotations
            #:mcp-tool-description
            #:mcp-tool-destructive-p
+           #:mcp-tool-execution
            #:mcp-tool-input-schema
            #:mcp-tool-name
            #:mcp-tool-output-schema
            #:mcp-tool-raw
            #:mcp-tool-read-only-p
+           #:mcp-tool-task-required-p
+           #:mcp-tool-task-support
            #:mcp-tool-title
            #:mcp-transport
            #:mcp-transport-close

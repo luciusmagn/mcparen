@@ -61,6 +61,19 @@
     :reader mcp-tool-annotations
     :type t
     :documentation "Optional behavior hints supplied by the MCP server.")
+   (execution
+    :initarg :execution
+    :initform nil
+    :reader mcp-tool-execution
+    :type t
+    :documentation "Optional execution metadata supplied by the MCP server.")
+   (task-support
+    :initarg :task-support
+    :initform "forbidden"
+    :reader mcp-tool-task-support
+    :type string
+    :documentation
+    "The validated taskSupport policy, defaulting to forbidden when absent.")
    (raw
     :initarg :raw
     :reader mcp-tool-raw
@@ -86,6 +99,13 @@
               (json-true-p value)
               t))
         t)))
+
+(-> mcp-tool-task-required-p (mcp-tool) boolean)
+(defun mcp-tool-task-required-p (tool)
+  "Return true when TOOL requires task-based execution."
+  (if (string= (mcp-tool-task-support tool) "required")
+      t
+      nil))
 
 (defclass mcp-call-result ()
   ((content
@@ -734,7 +754,8 @@
         (description (json-get raw "description" :absent))
         (input-schema (json-get raw "inputSchema"))
         (output-schema (json-get raw "outputSchema" :absent))
-        (annotations (json-get raw "annotations" :absent)))
+        (annotations (json-get raw "annotations" :absent))
+        (execution (json-get raw "execution" :absent)))
     (unless (and (stringp name)
                  (plusp (length name))
                  (or (eq title :absent) (stringp title))
@@ -780,17 +801,42 @@
                            key)
                    :method "tools/list"
                    :payload raw)))))
-    (make-instance 'mcp-tool
-                   :name name
-                   :title (unless (eq title :absent) title)
-                   :description
-                   (if (eq description :absent) "" description)
-                   :input-schema input-schema
-                   :output-schema
-                   (unless (eq output-schema :absent) output-schema)
-                   :annotations
-                   (unless (eq annotations :absent) annotations)
-                   :raw raw)))
+    (let ((task-support "forbidden"))
+      (unless (eq execution :absent)
+        (unless (hash-table-p execution)
+          (error 'mcp-protocol-error
+                 :message "tools/list returned malformed tool execution metadata."
+                 :method "tools/list"
+                 :payload raw))
+        (multiple-value-bind (value present-p)
+            (gethash "taskSupport" execution)
+          (when present-p
+            (unless (and
+                     (stringp value)
+                     (member
+                      value
+                      '("forbidden" "optional" "required")
+                      :test #'string=))
+              (error 'mcp-protocol-error
+                     :message
+                     "tools/list returned an invalid execution taskSupport value."
+                     :method "tools/list"
+                     :payload raw))
+            (setf task-support value))))
+      (make-instance 'mcp-tool
+                     :name name
+                     :title (unless (eq title :absent) title)
+                     :description
+                     (if (eq description :absent) "" description)
+                     :input-schema input-schema
+                     :output-schema
+                     (unless (eq output-schema :absent) output-schema)
+                     :annotations
+                     (unless (eq annotations :absent) annotations)
+                     :execution
+                     (unless (eq execution :absent) execution)
+                     :task-support task-support
+                     :raw raw))))
 
 (-> mcp-client--optional-string-field-p (hash-table string) boolean)
 (defun mcp-client--optional-string-field-p (object key)
@@ -845,27 +891,36 @@
           (mcp-client--list-all client "tools/list" "tools")))
 
 (-> mcp-client-call-tool
-    (mcp-client string t &key (:timeout real))
+    (mcp-client mcp-tool t &key (:timeout real))
     mcp-call-result)
 (defun mcp-client-call-tool
-    (client name arguments &key (timeout (mcp-client-tool-timeout client)))
-  "Call server tool NAME with JSON object ARGUMENTS."
-  (mcp-client--require-capability client "tools" "tools/call")
-  (unless (and (stringp name) (plusp (length name)))
+    (client tool arguments &key (timeout (mcp-client-tool-timeout client)))
+  "Call discovered server TOOL with JSON object ARGUMENTS."
+  (unless (typep tool 'mcp-tool)
     (error 'mcp-protocol-error
-           :message "An MCP tool call requires a non-empty name."
+           :message "An MCP tool call requires discovered tool metadata."
            :method "tools/call"
-           :payload nil))
+           :payload tool))
+  (when (mcp-tool-task-required-p tool)
+    (error 'mcp-task-execution-unsupported
+           :message
+           "That MCP tool requires task execution, which this client does not support."
+           :method "tools/call"
+           :payload (mcp-tool-raw tool)
+           :tool tool))
   (unless (hash-table-p arguments)
     (error 'mcp-protocol-error
            :message "MCP tool arguments must be a JSON object."
            :method "tools/call"
            :payload arguments))
+  (mcp-client--require-capability client "tools" "tools/call")
   (let ((result
           (mcp-client--request
            client
            "tools/call"
-           (json-object "name" name "arguments" arguments)
+           (json-object
+            "name" (mcp-tool-name tool)
+            "arguments" arguments)
            timeout)))
     (unless (hash-table-p result)
       (error 'mcp-protocol-error

@@ -190,6 +190,18 @@
       (t
        (error "Unexpected scripted MCP method ~S." method)))))
 
+(-> test-tool (string &key (:execution t)) mcp-tool)
+(defun test-tool (name &key (execution nil execution-present-p))
+  "Return a discovered test tool named NAME with optional EXECUTION metadata."
+  (let ((raw
+          (json-object
+           "name" name
+           "description" "Deterministic test tool."
+           "inputSchema" (json-object "type" "object"))))
+    (when execution-present-p
+      (setf (gethash "execution" raw) execution))
+    (mcp-client--raw->tool raw)))
+
 
 ;;;; -- Bounded Thread Helpers --
 
